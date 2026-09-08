@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ETGDriverApp", "ETGDriverApp\ETGDriverApp.csproj", "{BFBE7403-75B0-4A88-9EEE-AEBD9A503D6B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ETGDriverApp.Core", "ETGDriverApp.Core\ETGDriverApp.Core.csproj", "{A0F8CD8C-F281-4F9F-9C8F-034F0F1DDE57}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BFBE7403-75B0-4A88-9EEE-AEBD9A503D6B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BFBE7403-75B0-4A88-9EEE-AEBD9A503D6B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BFBE7403-75B0-4A88-9EEE-AEBD9A503D6B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BFBE7403-75B0-4A88-9EEE-AEBD9A503D6B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0F8CD8C-F281-4F9F-9C8F-034F0F1DDE57}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0F8CD8C-F281-4F9F-9C8F-034F0F1DDE57}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0F8CD8C-F281-4F9F-9C8F-034F0F1DDE57}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0F8CD8C-F281-4F9F-9C8F-034F0F1DDE57}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
