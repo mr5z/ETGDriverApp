@@ -25,6 +25,9 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     // through its own process noise, so a second drift model here would
     // compound with it.
     private const double DeadReckonedAccuracyMeters = 30;
+    private const double BaseAccuracyMeters = 30;
+    private const double HeadingDriftDegPerSec = 0.5;
+    private const double SpeedErrorFraction = 0.1;
     
     // temporary; remove once DR speed is sorted
     public static event EventHandler<string>? Trace;
@@ -36,6 +39,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     private double _estimatedLongitude;
     private bool _hasAnchor;
     private double _speedMps;
+    private DateTimeOffset _anchoredAt;
 
     // raw integrated device yaw; never overwritten at recalibration
     private double _headingDegrees;
@@ -77,9 +81,12 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                     
                     var floor = Math.Max(trustedFix.EffectiveRadiusMeters, 10);
 
-                    // below the fix error, the bearing between two points is
-                    // the direction of the noise
-                    if (travelled > floor)
+                    // across an outage this bearing is a catch-up vector, not a heading. DR
+                    // extrapolated at _speedMps, so anything much beyond that in the elapsed
+                    // time is the accumulated drift being closed, not distance travelled.
+                    var plausible = _speedMps * elapsed + trustedFix.EffectiveRadiusMeters;
+
+                    if (travelled > floor && travelled <= plausible)
                     {
                         _headingOffsetDegrees = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
                     }
@@ -155,11 +162,15 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
         foreach (var sensor in _sensors)
         {
-            if (sensor is IHeadingRateProvider headingRate)
-                headingRate.HeadingRateChanged -= OnHeadingRateChanged;
-
-            if (sensor is IMotionStateProvider motionState)
-                motionState.MotionStateChanged -= OnMotionStateChanged;
+            switch (sensor)
+            {
+                case IHeadingRateProvider headingRate:
+                    headingRate.HeadingRateChanged -= OnHeadingRateChanged;
+                    break;
+                case IMotionStateProvider motionState:
+                    motionState.MotionStateChanged -= OnMotionStateChanged;
+                    break;
+            }
 
             sensor.Stop();
         }
@@ -177,6 +188,13 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             _lastHeadingUpdate = now;
 
             if (dt <= 0)
+                return;
+            
+            // a parked vehicle's gyro reads bias and noise, nothing else.
+            // integrating it only accumulates heading error that no
+            // recalibration can remove, because a stationary vehicle never
+            // travels far enough to clear RecalibrateAgainst's floor.
+            if (_motionState == MotionState.Stationary)
                 return;
 
             _headingDegrees = Geo.NormalizeDegrees(_headingDegrees + degPerSec * dt);
@@ -215,9 +233,16 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             _estimatedLatitude = lat;
             _estimatedLongitude = lon;
             _lastExtrapolationAt = now;
+            
+            var sinceAnchor = (now - _anchoredAt).TotalSeconds;
+            var accuracy = DriftAccuracyMeters(sinceAnchor, effectiveSpeed);
 
             sample = new RawPositionSample(
                 lat, lon, DeadReckonedAccuracyMeters, now, PositionSourceType.DeadReckoned,
+                effectiveSpeed, correctedHeading);
+            
+            sample = new RawPositionSample(
+                lat, lon, accuracy, now, PositionSourceType.DeadReckoned,
                 effectiveSpeed, correctedHeading);
             
             Trace?.Invoke(this,
@@ -230,6 +255,23 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
     private static TimeSpan IntervalFor(DeadReckoningRate rate) =>
         rate == DeadReckoningRate.Full ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(10);
+    
+    // The mean cross-track offset of a track rotating at HeadingDriftDegPerSec
+    // is roughly half the final heading error times the distance covered.
+    private static double DriftAccuracyMeters(double seconds, double speedMps)
+    {
+        if (seconds <= 0)
+            return BaseAccuracyMeters;
+
+        var headingErrorRad = Geo.ToRad(HeadingDriftDegPerSec * seconds);
+        var crossTrack = speedMps * seconds * headingErrorRad / 2;
+        var alongTrack = SpeedErrorFraction * speedMps * seconds;
+
+        return Math.Sqrt(
+            BaseAccuracyMeters * BaseAccuracyMeters +
+            crossTrack * crossTrack +
+            alongTrack * alongTrack);
+    }
 }
 
 internal class DeadReckoningFeed(

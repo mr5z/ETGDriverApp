@@ -11,6 +11,21 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     // above AccuracyGate's (threshold - band) = 30m, so it classifies Borderline
     private const double DegradedAccuracyMeters = 42;
 
+    // a waypoint counts as reached once inside this, so the pursuit doesn't
+    // circle a point it can never land exactly on
+    private const double WaypointReachedMeters = 20;
+
+    // ~4s for a 90 degree corner at 22.5 deg/s, which is roughly a real
+    // intersection and well inside what heading integration can follow
+    private const double TurnRateDegPerSec = 22.5;
+
+    // below this the tick counts as straight running, so HeadingRateDegPerSec
+    // is exactly 0 on a leg and the gyro sees only its bias
+    private const double StraightThresholdDegPerSec = 0.5;
+
+    // vehicles slow for corners; this also keeps the pursuit radius sane
+    private const double CorneringSpeedFactor = 0.5;
+
     // defaults chosen so the two are visibly distinct on the timeline:
     // degrade sits in Borderline for a while, blackout crosses the
     // watchdog's 20s HardThreshold into DeadReckoning
@@ -34,13 +49,18 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     // configured before StartAsync
     public (double Lat, double Lon) From { get; set; }
     public (double Lat, double Lon) To { get; set; }
+
+    // intermediate corners between From and To. Empty means the old
+    // single straight leg; anything else makes the route turn.
+    public IReadOnlyList<(double Lat, double Lon)> Waypoints { get; set; } = [];
+
     public TimeSpan TickInterval { get; set; } = TimeSpan.FromSeconds(1);
     public double SpeedMps { get; set; } = 12;
 
     public bool IsDegraded => DateTimeOffset.UtcNow < _degradedUntil;
 
     public bool IsBlackedOut => DateTimeOffset.UtcNow < _blackoutUntil;
-    
+
     public MauiLocation? LastEmitted => _last;
 
     public void Degrade() => _degradedUntil = DateTimeOffset.UtcNow + DegradeDuration;
@@ -50,6 +70,10 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     public void Blackout() => _blackoutUntil = DateTimeOffset.UtcNow + BlackoutDuration;
 
     public event EventHandler? Arrived;
+
+    // fired as each corner is passed, so the log can be lined up against
+    // the heading-offset trace
+    public event EventHandler<int>? WaypointReached;
 
     event EventHandler<MauiLocation> ILocationListener.LocationReceived
     {
@@ -64,7 +88,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     }
 
     LocationSessionState ILocationListener.State => _state;
-    
+
     async Task<bool> ILocationListener.RequestPermissionAsync()
     {
         var whenInUse = await Permissions.CheckStatusAsync<Permissions.LocationWhenInUse>();
@@ -101,7 +125,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
 
             _cts = new CancellationTokenSource();
             _state = LocationSessionState.Running;
-            _loop = Task.Run(() => RunAsync(_cts.Token));
+            _loop = Task.Run(() => RunAsync(_cts.Token), _cts.Token);
         }
 
         return Task.FromResult(true);
@@ -147,41 +171,89 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     private async Task RunAsync(CancellationToken ct)
     {
         var (lat, lon) = From;
-        var remaining = Geo.DistanceMeters(From.Lat, From.Lon, To.Lat, To.Lon);
-        _heading = Geo.BearingDegrees(From.Lat, From.Lon, To.Lat, To.Lon);
-        
-        // the route is one straight leg, so heading never changes and the
-        // gyro sees only its own bias
+        var route = BuildRoute();
+        var leg = 0;
+
+        // start already pointing down the first leg, so the run doesn't open
+        // with a turn the vehicle would never actually make
+        _heading = Geo.BearingDegrees(lat, lon, route[0].Lat, route[0].Lon);
+
         vehicle.HeadingDegrees = _heading;
         vehicle.HeadingRateDegPerSec = 0;
         vehicle.SpeedMps = SpeedMps;
+
+        var dt = TickInterval.TotalSeconds;
 
         using var timer = new PeriodicTimer(TickInterval);
 
         Emit(lat, lon);
 
-        // runs until StopAsync cancels; on arrival it parks at B and keeps
-        // emitting, which is what lets the pickup dwell actually elapse
+        // runs until StopAsync cancels; on arrival it parks at the last
+        // waypoint and keeps emitting, which is what lets the pickup dwell
+        // actually elapse
         while (await timer.WaitForNextTickAsync(ct))
         {
-            if (remaining > 0)
+            if (leg < route.Count)
             {
-                var step = Math.Min(SpeedMps * TickInterval.TotalSeconds, remaining);
+                var target = route[leg];
+
+                // steer toward the waypoint at a bounded rate rather than
+                // snapping; the result is a pursuit curve, which is close
+                // enough to a real corner and cuts it the way a car does
+                var desired = Geo.BearingDegrees(lat, lon, target.Lat, target.Lon);
+                var delta = SignedDelta(_heading, desired);
+                var maxTurn = TurnRateDegPerSec * dt;
+                var turn = Math.Clamp(delta, -maxTurn, maxTurn);
+
+                _heading = Geo.NormalizeDegrees(_heading + turn);
+
+                var rate = turn / dt;
+
+                if (Math.Abs(rate) < StraightThresholdDegPerSec)
+                    rate = 0;
+
+                var speed = rate == 0 ? SpeedMps : SpeedMps * CorneringSpeedFactor;
+                var remaining = Geo.DistanceMeters(lat, lon, target.Lat, target.Lon);
+                var step = Math.Min(speed * dt, remaining);
 
                 (lat, lon) = Geo.Project(lat, lon, _heading, step);
-                remaining -= step;
-                
-                if (remaining <= 0)
+
+                vehicle.HeadingDegrees = _heading;
+                vehicle.HeadingRateDegPerSec = rate;
+                vehicle.SpeedMps = speed;
+
+                if (Geo.DistanceMeters(lat, lon, target.Lat, target.Lon) <= WaypointReachedMeters)
                 {
-                    vehicle.SpeedMps = 0;
-                    Arrived?.Invoke(this, EventArgs.Empty);
+                    leg++;
+
+                    if (leg < route.Count)
+                    {
+                        WaypointReached?.Invoke(this, leg);
+                    }
+                    else
+                    {
+                        vehicle.HeadingRateDegPerSec = 0;
+                        vehicle.SpeedMps = 0;
+                        Arrived?.Invoke(this, EventArgs.Empty);
+                    }
                 }
             }
 
             Emit(lat, lon);
         }
     }
-    
+
+    private IReadOnlyList<(double Lat, double Lon)> BuildRoute() =>
+        Waypoints.Count == 0 ? [To] : [.. Waypoints, To];
+
+    // shortest signed turn from a to b, in -180..180
+    private static double SignedDelta(double from, double to)
+    {
+        var delta = Geo.NormalizeDegrees(to - from);
+
+        return delta > 180 ? delta - 360 : delta;
+    }
+
     private void Emit(double lat, double lon)
     {
         var location = new MauiLocation(lat, lon)

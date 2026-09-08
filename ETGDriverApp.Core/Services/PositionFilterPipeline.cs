@@ -142,12 +142,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
                     return null;
                 }
 
-                // a DR estimate is a weak measurement, not a separate stage
-                var accuracy = sample.SourceType == PositionSourceType.DeadReckoned
-                    ? Math.Max(_filter.PositionUncertaintyMeters * 2, 25)
-                    : sample.AccuracyMeters;
-
-                _filter.UpdatePosition(sample.Latitude, sample.Longitude, accuracy);
+                _filter.UpdatePosition(sample.Latitude, sample.Longitude, sample.AccuracyMeters);
 
                 if (sample.SourceType != PositionSourceType.DeadReckoned &&
                     sample is { SpeedMps: { } speed, CourseDegrees: { } course })
