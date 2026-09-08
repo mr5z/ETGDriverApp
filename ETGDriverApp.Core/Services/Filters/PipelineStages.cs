@@ -29,6 +29,7 @@ internal class AccuracyGate(
 internal class SpeedSanityChecker(double maxPlausibleSpeedKph = 300) : ISpeedSanityChecker
 {
     private static readonly TimeSpan MinimumInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MaxTrustedAnchorAge = TimeSpan.FromSeconds(30);
 
     double ISpeedSanityChecker.MaxPlausibleSpeedKph => maxPlausibleSpeedKph;
 
@@ -38,6 +39,11 @@ internal class SpeedSanityChecker(double maxPlausibleSpeedKph = 300) : ISpeedSan
 
         // too close together for the implied speed to mean anything
         if (dt < MinimumInterval)
+            return true;
+        
+        // an anchor this old can't disprove anything; refusing forever is worse
+        // than accepting one bad fix
+        if (dt > MaxTrustedAnchorAge)
             return true;
 
         var distance = Geo.DistanceMeters(
@@ -53,6 +59,28 @@ internal class SpeedSanityChecker(double maxPlausibleSpeedKph = 300) : ISpeedSan
         var impliedKph = correctedDistance / dt.TotalSeconds * 3.6;
 
         return impliedKph <= maxPlausibleSpeedKph;
+    }
+    
+    double? ISpeedSanityChecker.ImpliedKph(RawPositionSample candidate, NormalizedPosition lastAccepted)
+    {
+        var dt = candidate.Timestamp - lastAccepted.Timestamp;
+
+        // too close together for the implied speed to mean anything
+        if (dt < MinimumInterval)
+            return null;
+
+        var distance = Geo.DistanceMeters(
+            lastAccepted.Latitude, lastAccepted.Longitude,
+            candidate.Latitude, candidate.Longitude);
+
+        // both endpoints have error, so the apparent jump can exceed the real
+        // one by roughly the sum of the two radii
+        var errorAllowance = lastAccepted.EffectiveRadiusMeters +
+                             (double.IsFinite(candidate.AccuracyMeters) ? candidate.AccuracyMeters : 0);
+
+        var correctedDistance = Math.Max(0, distance - errorAllowance);
+
+        return correctedDistance / dt.TotalSeconds * 3.6;
     }
 }
 

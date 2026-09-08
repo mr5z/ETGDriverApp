@@ -2,7 +2,7 @@ using ETGDriverApp.Core.Models;
 
 namespace ETGDriverApp.Core.Services;
 
-internal interface IPositionStore
+public interface IPositionStore
 {
     Task PersistAsync(NormalizedPosition position, CancellationToken ct = default);
 

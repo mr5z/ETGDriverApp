@@ -2,7 +2,7 @@ using ETGDriverApp.Core.Models;
 
 namespace ETGDriverApp.Core.Services;
 
-internal interface IPositionFilterPipeline
+public interface IPositionFilterPipeline
 {
     event EventHandler<PositionEvaluatedEventArgs> PositionEvaluated;
 
@@ -17,13 +17,16 @@ internal interface IPositionFilterPipeline
     NormalizedPosition? Current { get; }
 }
 
-internal record PositionEvaluatedEventArgs(
+public record PositionEvaluatedEventArgs(
     RawPositionSample Sample,
     bool Accepted,
-    RejectionReason Reason);
+    RejectionReason Reason,
+    string? Diagnostics = null);
 
 internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 {
+    private static readonly TimeSpan MaxBlendableAge = TimeSpan.FromSeconds(10);
+    
     private readonly IAccuracyGate _accuracyGate;
     private readonly ISpeedSanityChecker _speedChecker;
     private readonly IPositionSmoother _smoother;
@@ -35,8 +38,9 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
     // timer, and forced fixes
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    private NormalizedPosition? _current;
+    private NormalizedPosition? _published;
     private NormalizedPosition? _lastDeadReckoned;
+    private NormalizedPosition? _lastRealFix;
     private DateTimeOffset _lastAcceptedTimestamp = DateTimeOffset.MinValue;
 
     private EventHandler<PositionEvaluatedEventArgs>? _positionEvaluated;
@@ -79,7 +83,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         remove => _locationUnavailable -= value;
     }
 
-    NormalizedPosition? IPositionFilterPipeline.Current => Volatile.Read(ref _current);
+    NormalizedPosition? IPositionFilterPipeline.Current => Volatile.Read(ref _published);
 
     async Task<NormalizedPosition?> IPositionFilterPipeline.IngestAsync(
         RawPositionSample sample, CancellationToken ct)
@@ -124,23 +128,40 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
             return null;
         }
+        
+        var implied = _lastRealFix is null ? null : _speedChecker.ImpliedKph(sample, _lastRealFix);
 
-        if (_current is not null && !_speedChecker.Accepts(sample, _current))
+        if (implied > _speedChecker.MaxPlausibleSpeedKph)
+        {
+            RaiseEvaluated(sample, false, RejectionReason.ImplausibleJump,
+                $"kph={implied:F0} anchor={_lastRealFix!.Latitude:F5},{_lastRealFix.Longitude:F5} " +
+                $"src={_lastRealFix.SourceType} dt={(sample.Timestamp - _lastRealFix.Timestamp).TotalSeconds:F2}");
+
+            return null;
+        }
+        
+        if (_lastRealFix is not null && !_speedChecker.Accepts(sample, _lastRealFix))
         {
             RaiseEvaluated(sample, accepted: false, RejectionReason.ImplausibleJump);
 
             return null;
         }
 
-        var smoothed = _smoother.Smooth(sample, _current);
+        var smoothed = _smoother.Smooth(sample, _lastRealFix);
         var matched = await _mapMatcher.SnapToRoadAsync(smoothed, ct);
 
         _stateMachine.NotifyFixAccepted(matched, tier);
 
         var state = _stateMachine.CurrentState;
 
-        var final = state is PositionState.Degraded or PositionState.Reacquiring && _lastDeadReckoned is not null
-            ? _blender.Blend(matched, _lastDeadReckoned, gpsWeight: state == PositionState.Reacquiring ? 0.7 : 0.5)
+        // a DR estimate that has been free-running is worse than no estimate
+        var blendable = _lastDeadReckoned is { } dr &&
+                        matched.Timestamp - dr.Timestamp <= MaxBlendableAge
+            ? dr
+            : null;
+
+        var final = state is PositionState.Degraded or PositionState.Reacquiring && blendable is not null
+            ? _blender.Blend(matched, blendable, gpsWeight: state == PositionState.Reacquiring ? 0.7 : 0.5)
             : matched;
 
         var result = final with
@@ -149,7 +170,9 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             UncertaintyRadiusMeters = _stateMachine.UncertaintyRadiusMeters
         };
 
-        Volatile.Write(ref _current, result);
+        Volatile.Write(ref _published, result);
+        
+        _lastRealFix = matched;
         _lastAcceptedTimestamp = sample.Timestamp;
 
         RaiseEvaluated(sample, accepted: true, RejectionReason.None);
@@ -160,7 +183,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
     private async Task<NormalizedPosition?> IngestDeadReckonedAsync(RawPositionSample sample, CancellationToken ct)
     {
-        var smoothed = _smoother.Smooth(sample, _current);
+        var smoothed = _smoother.Smooth(sample, _published);
         var matched = await _mapMatcher.SnapToRoadAsync(smoothed, ct);
 
         var tagged = matched with
@@ -174,7 +197,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         if (_stateMachine.CurrentState != PositionState.DeadReckoning)
             return null;
 
-        Volatile.Write(ref _current, tagged);
+        Volatile.Write(ref _published, tagged);
 
         RaiseEvaluated(sample, accepted: true, RejectionReason.None);
         _positionUpdated?.Invoke(this, tagged);
@@ -184,10 +207,10 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
     private void OnLocationBecameUnavailable(object? sender, EventArgs e)
     {
-        Volatile.Write(ref _current, null);
+        Volatile.Write(ref _published, null);
         _locationUnavailable?.Invoke(this, EventArgs.Empty);
     }
 
-    private void RaiseEvaluated(RawPositionSample sample, bool accepted, RejectionReason reason) =>
-        _positionEvaluated?.Invoke(this, new PositionEvaluatedEventArgs(sample, accepted, reason));
+    private void RaiseEvaluated(RawPositionSample sample, bool accepted, RejectionReason reason, string? diagnostics = null) =>
+        _positionEvaluated?.Invoke(this, new PositionEvaluatedEventArgs(sample, accepted, reason, diagnostics));
 }

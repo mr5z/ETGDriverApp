@@ -1,9 +1,6 @@
-using ETGDriverApp.Core.Models;
-using ETGDriverApp.Core.Services;
-
 namespace ETGDriverApp.Core.Services.Jobs;
 
-internal interface IJobSiteMonitor
+public interface IJobSiteMonitor
 {
     void ArmForJob(JobAssignment job);
 
@@ -18,7 +15,7 @@ internal interface IJobSiteMonitor
     event EventHandler<OnSiteEvent> OnSiteSet;
 }
 
-internal record OnSiteAvailableEventArgs(
+public record OnSiteAvailableEventArgs(
     string JobId,
     OnSiteMode Mode,
     GeofenceEventConfidence Confidence);

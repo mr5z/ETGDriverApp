@@ -2,11 +2,11 @@ using ETGDriverApp.Core.Models;
 
 namespace ETGDriverApp.Core.Services;
 
-internal enum GeofenceTransition { Entered, Exited }
+public enum GeofenceTransition { Entered, Exited }
 
-internal enum GeofenceEventConfidence { Suppressed, LowConfidence, Trusted }
+public enum GeofenceEventConfidence { Suppressed, LowConfidence, Trusted }
 
-internal interface IGeofenceRegion
+public interface IGeofenceRegion
 {
     string Id { get; }
 

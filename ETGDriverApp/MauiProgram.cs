@@ -1,5 +1,8 @@
-﻿using ETGDriverApp.Core.Services;
+﻿using ETGDriverApp.Core;
+using ETGDriverApp.Core.Services;
+using ETGDriverApp.Core.Services.Jobs;
 using ETGDriverApp.Pages;
+using ETGDriverApp.Services;
 using ETGDriverApp.ViewModels;
 using Microsoft.Extensions.Logging;
 using Nkraft.MvvmEssentials;
@@ -27,9 +30,16 @@ public static class MauiProgram
         builder.Logging.AddDebug();
 #endif
 
-        // TryAdd, so a head project with its own implementation wins
+        builder.UseMauiMaps();
+
+        builder.Services.AddSingleton<SimulatedLocationListener>();
+        builder.Services.AddSingleton<ILocationListener>(sp => sp.GetRequiredService<SimulatedLocationListener>());
+        builder.Services.AddSingleton<NoOpJobStatusWriter>();
+        builder.Services.AddSingleton<IJobStatusWriter>(sp => sp.GetRequiredService<NoOpJobStatusWriter>());
+        builder.Services.AddDriverPositioning();
+        
 #if ANDROID
-        builder.Services.AddSingleton<ILocationListener, AndroidLocationListener>();
+        //builder.Services.AddSingleton<ILocationListener, AndroidLocationListener>();
 #elif IOS
         builder.Services.AddSingleton<ILocationListener, AppleLocationListener>();
 #endif

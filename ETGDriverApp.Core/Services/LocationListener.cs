@@ -3,16 +3,16 @@ using MauiLocation = Microsoft.Maui.Devices.Sensors.Location;
 
 namespace ETGDriverApp.Core.Services;
 
-internal enum LocationSessionState { Stopped, Running }
+public enum LocationSessionState { Stopped, Running }
 
-internal enum SessionEndReason
+public enum SessionEndReason
 {
     ForegroundServiceStopped,
     PermissionRevoked
 }
 
 // one subscription for the whole session, foreground and background alike
-internal interface ILocationListener
+public interface ILocationListener
 {
     event EventHandler<MauiLocation> LocationReceived;
 
@@ -35,7 +35,7 @@ internal interface ILocationListener
     Task<MauiLocation?> GetForcedFixAsync(CancellationToken ct = default);
 }
 
-internal class PositionFeed(
+public class PositionFeed(
     ILocationListener listener,
     IPositionFilterPipeline pipeline,
     IPositionStore store)

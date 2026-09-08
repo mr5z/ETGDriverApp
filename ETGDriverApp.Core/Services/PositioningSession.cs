@@ -3,7 +3,7 @@ using ETGDriverApp.Core.Services.DeadReckoning;
 
 namespace ETGDriverApp.Core.Services;
 
-internal interface IPositioningSession
+public interface IPositioningSession
 {
     bool IsRunning { get; }
 
@@ -16,13 +16,13 @@ internal interface IPositioningSession
     Task StopAsync(CancellationToken ct = default);
 }
 
-internal record StartResult(
+public record StartResult(
     bool Started,
     bool HasBackgroundPermission,
     IReadOnlyList<NormalizedPosition> RecoveredTrack,
     StartFailure? Failure = null);
 
-internal enum StartFailure
+public enum StartFailure
 {
     PermissionDenied,
     NotVisible,

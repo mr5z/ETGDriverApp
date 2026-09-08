@@ -2,8 +2,94 @@
 
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:maps="clr-namespace:Microsoft.Maui.Controls.Maps;assembly=Microsoft.Maui.Controls.Maps"
              xmlns:vm="clr-namespace:ETGDriverApp.ViewModels"
+             xmlns:beh="clr-namespace:ETGDriverApp.Behaviors"
              x:Class="ETGDriverApp.Pages.MainPage"
-             x:DataType="vm:MainViewModel">
-    <Label FontSize="44" Text="Hello World!" />
+             x:DataType="vm:MainViewModel"
+             Title="Positioning Simulator">
+
+    <Grid RowDefinitions="*,Auto,140">
+
+        <maps:Map Grid.Row="0"
+                  MapType="Street"
+                  ItemsSource="{Binding MapPoints}"
+                  beh:MapCirclesBehavior.ItemsSource="{Binding MapCircles}"
+                  beh:MapRegionBehavior.Center="{Binding CameraCenter}"
+                  beh:MapRegionBehavior.RadiusMeters="{Binding CameraRadiusMeters}">
+            <maps:Map.ItemTemplate>
+                <DataTemplate x:DataType="vm:MapPointViewModel">
+                    <maps:Pin Location="{Binding Location}"
+                              Label="{Binding Label}"
+                              Address="{Binding Detail}" />
+                </DataTemplate>
+            </maps:Map.ItemTemplate>
+        </maps:Map>
+
+        <VerticalStackLayout Grid.Row="1" Padding="10,6" Spacing="6">
+
+            <Label Text="{Binding StatusText}"
+                   FontSize="11"
+                   LineBreakMode="TailTruncation" />
+
+            <Grid ColumnDefinitions="*,*,*"
+                  RowDefinitions="Auto,Auto"
+                  ColumnSpacing="6"
+                  RowSpacing="6">
+
+                <Button Grid.Row="0" Grid.Column="0"
+                        Text="Add Job"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding AddRandomJobCommand}" />
+
+                <Button Grid.Row="0" Grid.Column="1"
+                        Text="{Binding TripButtonText}"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding ToggleTripCommand}" />
+
+                <Button Grid.Row="0" Grid.Column="2"
+                        Text="On Site"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding ConfirmOnSiteCommand}" />
+
+                <Button Grid.Row="1" Grid.Column="0"
+                        Text="Degrade"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding DegradeAccuracyCommand}" />
+
+                <Button Grid.Row="1" Grid.Column="1"
+                        Text="Blackout"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding BlackoutCommand}" />
+
+                <Button Grid.Row="1" Grid.Column="2"
+                        Text="Permissions"
+                        FontSize="12"
+                        Padding="6,8"
+                        Command="{Binding RequestPermissionsCommand}" />
+            </Grid>
+        </VerticalStackLayout>
+
+        <!-- log area. Push into LogEntries yourself. -->
+        <Border Grid.Row="2"
+                Stroke="{StaticResource Gray300}"
+                StrokeThickness="1"
+                Margin="0,0,0,0">
+            <CollectionView ItemsSource="{Binding LogEntries}"
+                            ItemsUpdatingScrollMode="KeepLastItemInView">
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                        <Label Text="{Binding .}"
+                               FontSize="10"
+                               Padding="8,1" />
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+            </CollectionView>
+        </Border>
+    </Grid>
 </ContentPage>

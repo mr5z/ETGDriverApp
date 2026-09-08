@@ -1,8 +1,6 @@
-using ETGDriverApp.Core.Services;
-
 namespace ETGDriverApp.Core.Services.Jobs;
 
-internal enum JobStatus
+public enum JobStatus
 {
     Offered,
     Accepted,
@@ -14,7 +12,7 @@ internal enum JobStatus
     Cancelled
 }
 
-internal enum OnSiteMode
+public enum OnSiteMode
 {
     // geofence entry sets ON_SITE by itself
     Automatic,
@@ -26,24 +24,24 @@ internal enum OnSiteMode
 // OnSiteMode should come from the job payload, decided server-side. An
 // airport fence covers terminals, car parks and holding areas, so entering it
 // says little about reaching the passenger.
-internal record JobSite(
+public record JobSite(
     double Latitude,
     double Longitude,
     double GeofenceRadiusMeters,
     OnSiteMode OnSiteMode);
 
-internal record JobAssignment(
+public record JobAssignment(
     string JobId,
     JobSite Pickup,
     JobSite? Dropoff = null);
 
-internal enum OnSiteTrigger
+public enum OnSiteTrigger
 {
     AutomaticGeofence,
     DriverConfirmed
 }
 
-internal record OnSiteEvent(
+public record OnSiteEvent(
     string JobId,
     OnSiteTrigger Trigger,
     GeofenceEventConfidence Confidence,

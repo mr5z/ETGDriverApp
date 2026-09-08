@@ -1,20 +1,20 @@
 namespace ETGDriverApp.Core.Models;
 
-internal enum PositionSourceType
+public enum PositionSourceType
 {
     Continuous,
     Forced,
     DeadReckoned
 }
 
-internal record RawPositionSample(
+public record RawPositionSample(
     double Latitude,
     double Longitude,
     double AccuracyMeters,
     DateTimeOffset Timestamp,
     PositionSourceType SourceType);
 
-internal enum PositionState
+public enum PositionState
 {
     Tracking,
     Degraded,
@@ -22,7 +22,7 @@ internal enum PositionState
     Reacquiring
 }
 
-internal record NormalizedPosition(
+public record NormalizedPosition(
     double Latitude,
     double Longitude,
     double AccuracyMeters,
@@ -39,7 +39,7 @@ internal record NormalizedPosition(
             double.IsFinite(AccuracyMeters) ? AccuracyMeters : 0);
 }
 
-internal enum RejectionReason
+public enum RejectionReason
 {
     None,
     AccuracyBelowThreshold,
@@ -47,14 +47,14 @@ internal enum RejectionReason
     OutOfOrderTimestamp
 }
 
-internal enum AccuracyTier
+public enum AccuracyTier
 {
     Rejected,
     Borderline,
     Good
 }
 
-internal interface IAccuracyGate
+public interface IAccuracyGate
 {
     double AccuracyThresholdMeters { get; }
 
@@ -67,29 +67,31 @@ internal interface IAccuracyGate
     bool Accepts(RawPositionSample sample) => Classify(sample) != AccuracyTier.Rejected;
 }
 
-internal interface ISpeedSanityChecker
+public interface ISpeedSanityChecker
 {
     double MaxPlausibleSpeedKph { get; }
 
     bool Accepts(RawPositionSample candidate, NormalizedPosition lastAccepted);
+    
+    double? ImpliedKph(RawPositionSample candidate, NormalizedPosition lastAccepted);
 }
 
-internal interface IPositionSmoother
+public interface IPositionSmoother
 {
     NormalizedPosition Smooth(RawPositionSample accepted, NormalizedPosition? previous);
 }
 
-internal interface IMapMatcher
+public interface IMapMatcher
 {
     Task<NormalizedPosition> SnapToRoadAsync(NormalizedPosition smoothed, CancellationToken ct = default);
 }
 
-internal interface IPositionBlender
+public interface IPositionBlender
 {
     NormalizedPosition Blend(NormalizedPosition gpsDerived, NormalizedPosition deadReckoned, double gpsWeight);
 }
 
-internal static class Geo
+public static class Geo
 {
     public const double EarthRadiusMeters = 6_371_000;
 

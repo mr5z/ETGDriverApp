@@ -83,8 +83,8 @@ internal class PositionStateMachine(
                 _reacquiringSince = clock.GetUtcNow();
             else if (next != PositionState.Reacquiring)
                 _reacquiringSince = null;
-
-            shouldRecalibrate = wasExtrapolating && tier == AccuracyTier.Good;
+            
+            shouldRecalibrate = tier == AccuracyTier.Good;
 
             _deadReckoningStartedAt = null;
             _unavailableRaisedForCurrentEpisode = false;
