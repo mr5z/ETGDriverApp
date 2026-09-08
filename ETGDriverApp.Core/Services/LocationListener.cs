@@ -82,10 +82,11 @@ public class PositionFeed(
         if (location is not null)
             await IngestAndPersistAsync(ToSample(location, PositionSourceType.Forced), ct);
     }
-
+    
     internal static RawPositionSample ToSample(MauiLocation location, PositionSourceType source) =>
         new(location.Latitude, location.Longitude, location.Accuracy ?? double.MaxValue,
-            location.Timestamp, source);
+            location.Timestamp, source,
+            location.Speed, location.Course);
 
     private async void OnLocationReceived(object? sender, MauiLocation location)
     {

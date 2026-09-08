@@ -4,7 +4,7 @@ using MauiLocation = Microsoft.Maui.Devices.Sensors.Location;
 
 namespace ETGDriverApp.Services;
 
-public class SimulatedLocationListener : ILocationListener
+internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocationListener
 {
     private const double AccuracyMeters = 8;
 
@@ -26,6 +26,7 @@ public class SimulatedLocationListener : ILocationListener
     private Task? _loop;
     private MauiLocation? _last;
     private LocationSessionState _state = LocationSessionState.Stopped;
+    private double _heading;
 
     private EventHandler<MauiLocation>? _locationReceived;
     private EventHandler<SessionEndReason>? _sessionEndedUnexpectedly;
@@ -146,8 +147,14 @@ public class SimulatedLocationListener : ILocationListener
     private async Task RunAsync(CancellationToken ct)
     {
         var (lat, lon) = From;
-        var heading = Geo.BearingDegrees(From.Lat, From.Lon, To.Lat, To.Lon);
         var remaining = Geo.DistanceMeters(From.Lat, From.Lon, To.Lat, To.Lon);
+        _heading = Geo.BearingDegrees(From.Lat, From.Lon, To.Lat, To.Lon);
+        
+        // the route is one straight leg, so heading never changes and the
+        // gyro sees only its own bias
+        vehicle.HeadingDegrees = _heading;
+        vehicle.HeadingRateDegPerSec = 0;
+        vehicle.SpeedMps = SpeedMps;
 
         using var timer = new PeriodicTimer(TickInterval);
 
@@ -161,7 +168,7 @@ public class SimulatedLocationListener : ILocationListener
             {
                 var step = Math.Min(SpeedMps * TickInterval.TotalSeconds, remaining);
 
-                (lat, lon) = Geo.Project(lat, lon, heading, step);
+                (lat, lon) = Geo.Project(lat, lon, _heading, step);
                 remaining -= step;
 
                 if (remaining <= 0)
@@ -177,6 +184,8 @@ public class SimulatedLocationListener : ILocationListener
         var location = new MauiLocation(lat, lon)
         {
             Accuracy = IsDegraded ? DegradedAccuracyMeters : AccuracyMeters,
+            Speed = SpeedMps,
+            Course = _heading,
             Timestamp = DateTimeOffset.UtcNow
         };
 

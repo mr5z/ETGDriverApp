@@ -78,18 +78,50 @@
         <!-- log area. Push into LogEntries yourself. -->
         <Border Grid.Row="2"
                 Stroke="{StaticResource Gray300}"
-                StrokeThickness="1"
-                Margin="0,0,0,0">
-            <CollectionView ItemsSource="{Binding LogEntries}"
-                            ItemsUpdatingScrollMode="KeepLastItemInView">
-                <CollectionView.ItemTemplate>
-                    <DataTemplate x:DataType="x:String">
-                        <Label Text="{Binding .}"
-                               FontSize="10"
-                               Padding="8,1" />
-                    </DataTemplate>
-                </CollectionView.ItemTemplate>
-            </CollectionView>
+                StrokeThickness="1">
+            <Grid RowDefinitions="Auto,*">
+
+                <Grid Grid.Row="0"
+                      ColumnDefinitions="*,Auto,Auto"
+                      Padding="8,2"
+                      ColumnSpacing="4">
+
+                    <Label Grid.Column="0"
+                           Text="Logs"
+                           FontSize="10"
+                           VerticalOptions="Center" />
+
+                    <Button Grid.Column="1"
+                            Text="Copy"
+                            FontSize="10"
+                            Padding="8,0"
+                            HeightRequest="28"
+                            MinimumHeightRequest="28"
+                            MinimumWidthRequest="0"
+                            Command="{Binding CopyLogsCommand}" />
+
+                    <Button Grid.Column="2"
+                            Text="Clear"
+                            FontSize="10"
+                            Padding="8,0"
+                            HeightRequest="28"
+                            MinimumHeightRequest="28"
+                            MinimumWidthRequest="0"
+                            Command="{Binding ClearLogsCommand}" />
+                </Grid>
+
+                <CollectionView Grid.Row="1"
+                                ItemsSource="{Binding LogEntries}"
+                                ItemsUpdatingScrollMode="KeepLastItemInView">
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                            <Label Text="{Binding .}"
+                                   FontSize="10"
+                                   Padding="8,1" />
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+                </CollectionView>
+            </Grid>
         </Border>
     </Grid>
 </ContentPage>

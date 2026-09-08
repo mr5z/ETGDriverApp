@@ -3,6 +3,7 @@ using System.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services;
+using ETGDriverApp.Core.Services.DeadReckoning;
 using ETGDriverApp.Core.Services.Jobs;
 using ETGDriverApp.Services;
 using Nkraft.MvvmEssentials.ViewModels;
@@ -56,6 +57,7 @@ internal partial class MainViewModel : PageViewModel
     public MainViewModel(
         IPositioningSession session,
         IPositionFilterPipeline pipeline,
+        IPositionStateMachine stateMachine,
         IJobSiteMonitor jobs,
         SimulatedLocationListener simulator,
         NoOpJobStatusWriter statusWriter)
@@ -73,8 +75,11 @@ internal partial class MainViewModel : PageViewModel
         _statusWriter.StatusWritten += (_, message) => Append(message);
         _jobs.OnSiteAvailable += (_, e) => Append($"ON_SITE available {e.JobId} ({e.Mode}/{e.Confidence})");
         _jobs.OnSiteSet += (_, e) => Append($"ON_SITE set {e.JobId} via {e.Trigger}");
+        stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
+        
+        HeadingIntegrationDeadReckoningEstimator.Trace += (_, message) => Append(message);
     }
 
     public ObservableCollection<MapPointViewModel> MapPoints { get; } = [];
@@ -96,8 +101,8 @@ internal partial class MainViewModel : PageViewModel
     private void AddRandomJob()
     {
         var jobId = $"SIM-{_random.Next(1000, 9999)}";
-        var lat = Origin.Lat + (_random.NextDouble() - 0.5) * 0.02;
-        var lon = Origin.Lon + (_random.NextDouble() - 0.5) * 0.02;
+        var lat = Origin.Lat + (_random.NextDouble() - 0.5) * 0.04;
+        var lon = Origin.Lon + (_random.NextDouble() - 0.5) * 0.04;
         const double radius = 120;
         
         var job = new JobAssignment(jobId, new JobSite(lat, lon, radius, OnSiteMode.Automatic));
@@ -194,6 +199,20 @@ internal partial class MainViewModel : PageViewModel
         Append($"Driver confirmed ON_SITE for {jobId}");
     }
     
+    [RelayCommand]
+    private async Task CopyLogsAsync()
+    {
+        if (LogEntries.Count == 0)
+            return;
+
+        await Clipboard.SetTextAsync(string.Join(Environment.NewLine, LogEntries));
+
+        Append($"Copied {LogEntries.Count} lines to clipboard");
+    }
+
+    [RelayCommand]
+    private void ClearLogs() => LogEntries.Clear();
+    
     private bool CanConfirmOnSite() => NearestArmedJobId() is not null;
     
     private string? NearestArmedJobId()
@@ -259,6 +278,18 @@ internal partial class MainViewModel : PageViewModel
             
             ConfirmOnSiteCommand.NotifyCanExecuteChanged();
             OnPropertyChanged(new PropertyChangedEventArgs(nameof(OnSiteJobId)));
+            
+            if (position.SourceType == PositionSourceType.DeadReckoned)
+                Append($"DR estimate {position.Latitude:F5},{position.Longitude:F5}");
+            
+            if (position.SourceType == PositionSourceType.DeadReckoned &&
+                _simulator.LastEmitted is { } truth)
+            {
+                var error = Geo.DistanceMeters(
+                    position.Latitude, position.Longitude, truth.Latitude, truth.Longitude);
+
+                Append($"DR error {error:F0}m");
+            }
         });
     
     private void OnPositionEvaluated(object? sender, PositionEvaluatedEventArgs e)

@@ -18,6 +18,7 @@ internal record SessionRecoveryResult(
 internal class SessionRecovery(
     IPositionStore store,
     IPositionStateMachine stateMachine,
+    IPositionFilterPipeline pipeline,
     TimeProvider clock) : ISessionRecovery
 {
     private static readonly TimeSpan MaxUsefulContinuity = TimeSpan.FromMinutes(5);
@@ -33,11 +34,19 @@ internal class SessionRecovery(
         var now = clock.GetUtcNow();
         var gap = now - latest.Timestamp;
         var track = await store.GetSinceAsync(now - RecoveryWindow, ct);
-
+        
         // the pipeline is deliberately not seeded with the last persisted
-        // position: it would trip the speed checker on the first real fix
+        // position: it would be an unbounded extrapolation from a cold start
         if (gap > MaxUsefulContinuity)
-            stateMachine.NotifyFixStale();
+        {
+            stateMachine.NotifyFixStale(double.MaxValue);
+        }
+        else
+        {
+            // the filter widens from here rather than trusting it outright,
+            // so a stale seed costs nothing the first real fix won't correct
+            pipeline.SeedFrom(latest, gap);
+        }
 
         return new SessionRecoveryResult(track, gap);
     }

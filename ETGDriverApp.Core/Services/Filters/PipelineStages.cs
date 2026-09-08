@@ -6,12 +6,13 @@ internal class AccuracyGate(
     double accuracyThresholdMeters = 50,
     double degradedBandMeters = 20) : IAccuracyGate
 {
-    double IAccuracyGate.AccuracyThresholdMeters => accuracyThresholdMeters;
-
-    double IAccuracyGate.DegradedBandMeters => degradedBandMeters;
-
     AccuracyTier IAccuracyGate.Classify(RawPositionSample sample)
     {
+        // a DR estimate's plausibility is the filter's business; the gate
+        // exists to screen real fixes
+        if (sample.SourceType == PositionSourceType.DeadReckoned)
+            return AccuracyTier.Good;
+
         // MAUI surfaces "no accuracy reported" as null, mapped to MaxValue
         if (!double.IsFinite(sample.AccuracyMeters) || sample.AccuracyMeters < 0)
             return AccuracyTier.Rejected;
@@ -67,6 +68,9 @@ internal class SpeedSanityChecker(double maxPlausibleSpeedKph = 300) : ISpeedSan
 
         // too close together for the implied speed to mean anything
         if (dt < MinimumInterval)
+            return null;
+        
+        if (dt > MaxTrustedAnchorAge)
             return null;
 
         var distance = Geo.DistanceMeters(

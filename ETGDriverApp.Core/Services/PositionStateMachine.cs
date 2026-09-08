@@ -7,42 +7,39 @@ internal interface IPositionStateMachine
 {
     PositionState CurrentState { get; }
 
-    double? UncertaintyRadiusMeters { get; }
-
     event EventHandler<PositionState> StateChanged;
 
     event EventHandler LocationBecameUnavailable;
 
     void NotifyFixAccepted(NormalizedPosition fix, AccuracyTier tier);
 
-    void NotifyFixStale();
+    // uncertainty comes from the filter; the state machine only decides
+    // whether it has become too large to be useful
+    void NotifyFixStale(double uncertaintyRadiusMeters);
 
     void NotifyEnteringKnownDeadZone();
 
     void NotifyForegroundResuming();
 }
 
-internal class PositionStateMachine(
-    IDeadReckoningEstimator deadReckoning,
-    TimeProvider clock) : IPositionStateMachine
+internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
 {
-    private static readonly TimeSpan MaxDeadReckoningDuration = TimeSpan.FromSeconds(75);
+    // beyond this the position is too vague to act on: wider than any
+    // pickup fence, so a geofence decision could not be defended
+    private const double MaxUsefulUncertaintyMeters = 150;
+
     private static readonly TimeSpan ReacquisitionSettleDuration = TimeSpan.FromSeconds(5);
 
     private readonly Lock _sync = new();
 
-    private DateTimeOffset? _deadReckoningStartedAt;
     private DateTimeOffset? _reacquiringSince;
     private bool _unavailableRaisedForCurrentEpisode;
     private PositionState _currentState = PositionState.Tracking;
-    private double? _uncertaintyRadiusMeters;
 
     private EventHandler<PositionState>? _stateChanged;
     private EventHandler? _locationBecameUnavailable;
 
     PositionState IPositionStateMachine.CurrentState => _currentState;
-
-    double? IPositionStateMachine.UncertaintyRadiusMeters => _uncertaintyRadiusMeters;
 
     event EventHandler<PositionState> IPositionStateMachine.StateChanged
     {
@@ -58,12 +55,14 @@ internal class PositionStateMachine(
 
     void IPositionStateMachine.NotifyFixAccepted(NormalizedPosition fix, AccuracyTier tier)
     {
+        // an extrapolation is not evidence the outage ended
+        if (fix.SourceType == PositionSourceType.DeadReckoned)
+            return;
+
         PositionState? transitioned;
-        bool shouldRecalibrate;
 
         lock (_sync)
         {
-            // Degraded is a real but imprecise fix, not extrapolation
             var wasExtrapolating = _currentState is PositionState.DeadReckoning;
 
             var stillSettling =
@@ -83,54 +82,33 @@ internal class PositionStateMachine(
                 _reacquiringSince = clock.GetUtcNow();
             else if (next != PositionState.Reacquiring)
                 _reacquiringSince = null;
-            
-            shouldRecalibrate = tier == AccuracyTier.Good;
 
-            _deadReckoningStartedAt = null;
             _unavailableRaisedForCurrentEpisode = false;
-
-            _uncertaintyRadiusMeters = next switch
-            {
-                PositionState.Tracking => null,
-                _ => fix.AccuracyMeters
-            };
 
             transitioned = SetState(next);
         }
 
-        if (shouldRecalibrate)
-            deadReckoning.RecalibrateAgainst(fix);
-
         RaiseIfChanged(transitioned);
     }
 
-    void IPositionStateMachine.NotifyFixStale()
+    void IPositionStateMachine.NotifyFixStale(double uncertaintyRadiusMeters)
     {
         PositionState? transitioned;
         var raiseUnavailable = false;
 
         lock (_sync)
         {
-            _deadReckoningStartedAt ??= clock.GetUtcNow();
             _reacquiringSince = null;
-
-            var elapsed = clock.GetUtcNow() - _deadReckoningStartedAt.Value;
 
             transitioned = SetState(PositionState.DeadReckoning);
 
-            if (elapsed >= MaxDeadReckoningDuration)
+            // a stationary vehicle keeps its uncertainty low and stays
+            // usable; one at speed passes the threshold quickly
+            if (uncertaintyRadiusMeters >= MaxUsefulUncertaintyMeters &&
+                !_unavailableRaisedForCurrentEpisode)
             {
-                _uncertaintyRadiusMeters = null;
-
-                if (!_unavailableRaisedForCurrentEpisode)
-                {
-                    _unavailableRaisedForCurrentEpisode = true;
-                    raiseUnavailable = true;
-                }
-            }
-            else
-            {
-                _uncertaintyRadiusMeters = GrowUncertainty(elapsed);
+                _unavailableRaisedForCurrentEpisode = true;
+                raiseUnavailable = true;
             }
         }
 
@@ -145,10 +123,7 @@ internal class PositionStateMachine(
         PositionState? transitioned;
 
         lock (_sync)
-        {
-            _deadReckoningStartedAt ??= clock.GetUtcNow();
             transitioned = SetState(PositionState.DeadReckoning);
-        }
 
         RaiseIfChanged(transitioned);
     }
@@ -165,8 +140,6 @@ internal class PositionStateMachine(
 
         RaiseIfChanged(transitioned);
     }
-
-    private static double GrowUncertainty(TimeSpan elapsed) => elapsed.TotalSeconds * 2.0;
 
     // returns the new state only if it changed, so events are raised
     // outside the lock

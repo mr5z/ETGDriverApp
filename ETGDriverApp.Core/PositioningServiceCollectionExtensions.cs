@@ -18,16 +18,15 @@ internal static class PositioningServiceCollectionExtensions
     {
         services.AddSingleton(TimeProvider.System);
 
-        // Geolocation is deliberately not registered: its listener only
-        // delivers in the foreground and cannot enable background delivery
-        services.AddSingleton(Accelerometer.Default);
-        services.AddSingleton(Gyroscope.Default);
-
         services.AddSingleton<IAccuracyGate>(_ => new AccuracyGate());
-        services.AddSingleton<ISpeedSanityChecker>(_ => new SpeedSanityChecker());
-        services.AddSingleton<IPositionSmoother, InverseVarianceSmoother>();
+        services.AddSingleton<IAccuracyGate>(_ => new AccuracyGate());
+        services.AddSingleton<IPlausibilityGate>(_ => new PlausibilityGate());
         services.AddSingleton<IMapMatcher, NoOpMapMatcher>();
-        services.AddSingleton<IPositionBlender, UncertaintyWeightedBlender>();
+        
+        // TODO delete
+        // services.AddSingleton<IPositionBlender, UncertaintyWeightedBlender>();
+        // services.AddSingleton<IPositionSmoother, InverseVarianceSmoother>();
+        // services.AddSingleton<ISpeedSanityChecker>(_ => new SpeedSanityChecker());
 
         services.AddSingleton<DeviceOrientationReference>();
         services.AddSingleton<IPeriodicScheduler, PeriodicScheduler>();

@@ -31,6 +31,14 @@ public static class MauiProgram
 #endif
 
         builder.UseMauiMaps();
+        
+        
+        //builder.Services.AddSingleton(Accelerometer.Default);
+        //builder.Services.AddSingleton(Gyroscope.Default);
+        // simulated
+        builder.Services.AddSingleton<SimulatedVehicleState>();
+        builder.Services.AddSingleton<IAccelerometer, SimulatedAccelerometer>();
+        builder.Services.AddSingleton<IGyroscope, SimulatedGyroscope>();
 
         builder.Services.AddSingleton<SimulatedLocationListener>();
         builder.Services.AddSingleton<ILocationListener>(sp => sp.GetRequiredService<SimulatedLocationListener>());

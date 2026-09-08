@@ -98,7 +98,7 @@ internal class StalenessWatchdog(
             }
         }
     }
-
+    
     private async Task TickAsync(CancellationToken ct)
     {
         var now = clock.GetUtcNow();
@@ -112,9 +112,10 @@ internal class StalenessWatchdog(
             forcedFixDue = now - _lastForcedFixAt >= MinTimeBetweenForcedFixes;
         }
 
-        // repeated calls are intended: each advances the uncertainty radius
+        // repeated calls are intended: the filter's uncertainty grows between
+        // them, so the give-up threshold is reached on a later tick
         if (sinceFix >= HardThreshold)
-            stateMachine.NotifyFixStale();
+            stateMachine.NotifyFixStale(pipeline.PredictUncertaintyMeters(now));
 
         if (sinceFix >= SoftThreshold && forcedFixDue)
         {

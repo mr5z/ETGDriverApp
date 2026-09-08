@@ -12,7 +12,9 @@ public record RawPositionSample(
     double Longitude,
     double AccuracyMeters,
     DateTimeOffset Timestamp,
-    PositionSourceType SourceType);
+    PositionSourceType SourceType,
+    double? SpeedMps = null,
+    double? CourseDegrees = null);
 
 public enum PositionState
 {
@@ -56,15 +58,7 @@ public enum AccuracyTier
 
 public interface IAccuracyGate
 {
-    double AccuracyThresholdMeters { get; }
-
-    // fixes within this band below the threshold are accepted but
-    // classified Borderline, which is what drives PositionState.Degraded
-    double DegradedBandMeters { get; }
-
     AccuracyTier Classify(RawPositionSample sample);
-
-    bool Accepts(RawPositionSample sample) => Classify(sample) != AccuracyTier.Rejected;
 }
 
 public interface ISpeedSanityChecker

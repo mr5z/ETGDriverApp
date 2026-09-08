@@ -7,8 +7,8 @@ internal enum DeadReckoningRate { Low, Full }
 internal interface IDeadReckoningEstimator : IAsyncDisposable
 {
     void Start();
-
-    void RecalibrateAgainst(NormalizedPosition trustedFix);
+    
+    void RecalibrateAgainst(NormalizedPosition trustedFix, double speedMps);
 
     void SetRate(DeadReckoningRate rate);
 
@@ -21,6 +21,14 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     IPeriodicScheduler scheduler,
     TimeProvider clock) : IDeadReckoningEstimator
 {
+    // Deliberately weak and constant: the filter grows uncertainty over time
+    // through its own process noise, so a second drift model here would
+    // compound with it.
+    private const double DeadReckonedAccuracyMeters = 30;
+    
+    // temporary; remove once DR speed is sorted
+    public static event EventHandler<string>? Trace;
+    
     private readonly IReadOnlyList<IDeadReckoningSensorInput> _sensors = [.. sensors];
     private readonly Lock _sync = new();
 
@@ -49,7 +57,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         remove => _estimateProduced -= value;
     }
 
-    void IDeadReckoningEstimator.RecalibrateAgainst(NormalizedPosition trustedFix)
+    void IDeadReckoningEstimator.RecalibrateAgainst(NormalizedPosition trustedFix, double speedMps)
     {
         lock (_sync)
         {
@@ -66,17 +74,31 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                     var travelled = Geo.DistanceMeters(
                         _estimatedLatitude, _estimatedLongitude,
                         trustedFix.Latitude, trustedFix.Longitude);
+                    
+                    var floor = Math.Max(trustedFix.EffectiveRadiusMeters, 10);
 
                     // below the fix error, the bearing between two points is
                     // the direction of the noise
-                    if (travelled > Math.Max(trustedFix.EffectiveRadiusMeters, 10))
+                    if (travelled > floor)
                     {
                         _headingOffsetDegrees = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
                         _speedMps = travelled / elapsed;
                     }
+                    
+                    Trace?.Invoke(this,
+                        $"recal elapsed={elapsed:F2} travelled={travelled:F1} floor={floor:F1} speed={_speedMps:F1}");
+                }
+                else
+                {
+                    Trace?.Invoke(this, $"recal skipped: elapsed={elapsed:F2}");
                 }
             }
+            else
+            {
+                Trace?.Invoke(this, "recal: no anchor yet");
+            }
 
+            
             _estimatedLatitude = trustedFix.Latitude;
             _estimatedLongitude = trustedFix.Longitude;
             _lastExtrapolationAt = trustedFix.Timestamp;
@@ -167,7 +189,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         lock (_sync)
             _motionState = state;
     }
-
+    
     private void Extrapolate()
     {
         RawPositionSample sample;
@@ -195,9 +217,13 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             _estimatedLongitude = lon;
             _lastExtrapolationAt = now;
 
-            // consumers should read UncertaintyRadiusMeters, not this
             sample = new RawPositionSample(
-                lat, lon, double.PositiveInfinity, now, PositionSourceType.DeadReckoned);
+                lat, lon, DeadReckonedAccuracyMeters, now, PositionSourceType.DeadReckoned,
+                effectiveSpeed, correctedHeading);
+            
+            Trace?.Invoke(this,
+                $"extrap heading={_headingDegrees:F1} offset={_headingOffsetDegrees:F1} " +
+                $"corrected={correctedHeading:F1} speed={effectiveSpeed:F1}");
         }
 
         _estimateProduced?.Invoke(this, sample);
