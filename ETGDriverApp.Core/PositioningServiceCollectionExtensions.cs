@@ -19,7 +19,6 @@ internal static class PositioningServiceCollectionExtensions
         services.AddSingleton(TimeProvider.System);
 
         services.AddSingleton<IAccuracyGate>(_ => new AccuracyGate());
-        services.AddSingleton<IAccuracyGate>(_ => new AccuracyGate());
         services.AddSingleton<IPlausibilityGate>(_ => new PlausibilityGate());
         services.AddSingleton<IMapMatcher, NoOpMapMatcher>();
         

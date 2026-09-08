@@ -82,7 +82,6 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                     if (travelled > floor)
                     {
                         _headingOffsetDegrees = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
-                        _speedMps = travelled / elapsed;
                     }
                     
                     Trace?.Invoke(this,
@@ -98,7 +97,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                 Trace?.Invoke(this, "recal: no anchor yet");
             }
 
-            
+            _speedMps = speedMps;
             _estimatedLatitude = trustedFix.Latitude;
             _estimatedLongitude = trustedFix.Longitude;
             _lastExtrapolationAt = trustedFix.Timestamp;

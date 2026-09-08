@@ -170,9 +170,12 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
 
                 (lat, lon) = Geo.Project(lat, lon, _heading, step);
                 remaining -= step;
-
+                
                 if (remaining <= 0)
+                {
+                    vehicle.SpeedMps = 0;
                     Arrived?.Invoke(this, EventArgs.Empty);
+                }
             }
 
             Emit(lat, lon);
@@ -184,7 +187,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
         var location = new MauiLocation(lat, lon)
         {
             Accuracy = IsDegraded ? DegradedAccuracyMeters : AccuracyMeters,
-            Speed = SpeedMps,
+            Speed = vehicle.SpeedMps,
             Course = _heading,
             Timestamp = DateTimeOffset.UtcNow
         };
