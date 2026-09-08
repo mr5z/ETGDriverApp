@@ -1,5 +1,4 @@
 using ETGDriverApp.Core.Models;
-using ETGDriverApp.Core.Services.DeadReckoning;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -43,17 +42,17 @@ internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
     private bool _unavailableRaisedForCurrentEpisode;
     private PositionState _currentState = PositionState.Tracking;
 
-    private EventHandler<PositionState>? _stateChanged;
-    private EventHandler? _locationBecameUnavailable;
 
     PositionState IPositionStateMachine.CurrentState => _currentState;
 
+    private EventHandler<PositionState>? _stateChanged;
     event EventHandler<PositionState> IPositionStateMachine.StateChanged
     {
         add => _stateChanged += value;
         remove => _stateChanged -= value;
     }
 
+    private EventHandler? _locationBecameUnavailable;
     event EventHandler IPositionStateMachine.LocationBecameUnavailable
     {
         add => _locationBecameUnavailable += value;

@@ -99,12 +99,22 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         {
             // ordering: overlapping deliveries around a batched background
             // wake must not drag the track backwards
-            if (sample.Timestamp < _lastAcceptedTimestamp)
+            if (sample.SourceType != PositionSourceType.DeadReckoned &&
+                sample.Timestamp < _lastAcceptedTimestamp)
             {
                 RaiseEvaluated(sample, false, RejectionReason.OutOfOrderTimestamp);
 
                 return null;
             }
+                
+            // DR is derived from the filter's own past output; feeding it back while
+            // real fixes are arriving is circular. Discard before touching the filter:
+            // Predict is a state change, and the covariance growth it produces depends
+            // on the step size, so predicting on samples we reject makes uncertainty a
+            // function of the DR tick rate.
+            if (sample.SourceType == PositionSourceType.DeadReckoned &&
+                _stateMachine.CurrentState != PositionState.DeadReckoning)
+                return null;
 
             var tier = _accuracyGate.Classify(sample);
 
@@ -128,12 +138,6 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             else
             {
                 _filter.Predict(sample.Timestamp);
-                
-                // DR is derived from the filter's own past output; feeding it
-                // back while real fixes are arriving is circular
-                if (sample.SourceType == PositionSourceType.DeadReckoned &&
-                    _stateMachine.CurrentState != PositionState.DeadReckoning)
-                    return null;
 
                 if (!_plausibilityGate.Accepts(sample, _filter, out var diagnostics))
                 {
@@ -171,7 +175,9 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             };
 
             Volatile.Write(ref _published, result);
-            _lastAcceptedTimestamp = sample.Timestamp;
+            
+            if (sample.SourceType != PositionSourceType.DeadReckoned)
+                _lastAcceptedTimestamp = sample.Timestamp;
 
             RaiseEvaluated(sample, true, RejectionReason.None);
             _positionUpdated?.Invoke(this, result);
@@ -242,7 +248,6 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
     private void OnLocationBecameUnavailable(object? sender, EventArgs e)
     {
-        Volatile.Write(ref _published, null);
         _locationUnavailable?.Invoke(this, EventArgs.Empty);
     }
 

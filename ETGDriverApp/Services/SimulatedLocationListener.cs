@@ -30,7 +30,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     // degrade sits in Borderline for a while, blackout crosses the
     // watchdog's 20s HardThreshold into DeadReckoning
     public TimeSpan DegradeDuration { get; set; } = TimeSpan.FromSeconds(15);
-    public TimeSpan BlackoutDuration { get; set; } = TimeSpan.FromSeconds(35);
+    public TimeSpan BlackoutDuration { get; set; } = TimeSpan.FromMinutes(5);
 
     private DateTimeOffset _degradedUntil = DateTimeOffset.MinValue;
     private DateTimeOffset _blackoutUntil = DateTimeOffset.MinValue;

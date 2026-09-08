@@ -70,7 +70,7 @@ internal partial class MainViewModel : PageViewModel
 
         _pipeline.PositionUpdated += OnPositionUpdated;
         _pipeline.PositionEvaluated += OnPositionEvaluated;
-        _pipeline.LocationUnavailable += (_, e) => Append("LocationUnavailable — _current cleared");
+        _pipeline.LocationUnavailable += (_, e) => Append("LocationUnavailable — position no longer defensible");
         _simulator.Arrived += (_, _) => Append("Arrived at destination (holding position)");
         _statusWriter.StatusWritten += (_, message) => Append(message);
         _jobs.OnSiteAvailable += (_, e) => Append($"ON_SITE available {e.JobId} ({e.Mode}/{e.Confidence})");
@@ -101,8 +101,17 @@ internal partial class MainViewModel : PageViewModel
     private void AddRandomJob()
     {
         var jobId = $"SIM-{_random.Next(1000, 9999)}";
-        var lat = Origin.Lat + (_random.NextDouble() - 0.5) * 0.04;
-        var lon = Origin.Lon + (_random.NextDouble() - 0.5) * 0.04;
+        
+        // far enough that a five-minute blackout at 12 m/s (3.6 km) plus the
+        // settling and reacquisition legs all fit inside one trip
+        const double minDistanceMeters = 6000;
+        const double maxDistanceMeters = 8000;
+
+        var bearing = _random.NextDouble() * 360;
+        var distance = minDistanceMeters +
+                       _random.NextDouble() * (maxDistanceMeters - minDistanceMeters);
+
+        var (lat, lon) = Geo.Project(Origin.Lat, Origin.Lon, bearing, distance);
         const double radius = 120;
         
         var job = new JobAssignment(jobId, new JobSite(lat, lon, radius, OnSiteMode.Automatic));
@@ -272,7 +281,7 @@ internal partial class MainViewModel : PageViewModel
             MapCircles.Add(_accuracyCircle);
 
             CameraCenter = location;
-            CameraRadiusMeters = 400;
+            CameraRadiusMeters = 1500;
             StatusText = $"{position.State} · ±{position.EffectiveRadiusMeters:F0}m · " +
                          $"{position.Latitude:F5},{position.Longitude:F5}";
             

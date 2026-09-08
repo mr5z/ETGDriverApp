@@ -28,6 +28,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     private const double BaseAccuracyMeters = 30;
     private const double HeadingDriftDegPerSec = 0.5;
     private const double SpeedErrorFraction = 0.1;
+    private const double MinTrustworthyFixErrorMeters = 10;
     
     // temporary; remove once DR speed is sorted
     public static event EventHandler<string>? Trace;
@@ -79,14 +80,17 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                         _estimatedLatitude, _estimatedLongitude,
                         trustedFix.Latitude, trustedFix.Longitude);
                     
-                    var floor = Math.Max(trustedFix.EffectiveRadiusMeters, 10);
+                    var floor = Math.Max(trustedFix.EffectiveRadiusMeters, MinTrustworthyFixErrorMeters);
 
-                    // across an outage this bearing is a catch-up vector, not a heading. DR
-                    // extrapolated at _speedMps, so anything much beyond that in the elapsed
-                    // time is the accumulated drift being closed, not distance travelled.
-                    var plausible = _speedMps * elapsed + trustedFix.EffectiveRadiusMeters;
+                    // Across an outage this bearing is a catch-up vector, not a heading: it
+                    // points from where DR drifted to where the vehicle actually is. Bound it
+                    // by how far the vehicle could plausibly have gone since the last estimate,
+                    // using the incoming filter speed as well as the held one so the first
+                    // anchored fix (when _speedMps is still 0) is not rejected.
+                    var assumedSpeed = Math.Max(_speedMps, speedMps);
+                    var reachable = assumedSpeed * elapsed + floor;
 
-                    if (travelled > floor && travelled <= plausible)
+                    if (travelled > floor && travelled <= reachable)
                     {
                         _headingOffsetDegrees = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
                     }
@@ -108,6 +112,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             _estimatedLatitude = trustedFix.Latitude;
             _estimatedLongitude = trustedFix.Longitude;
             _lastExtrapolationAt = trustedFix.Timestamp;
+            _anchoredAt = trustedFix.Timestamp;
             _hasAnchor = true;
         }
     }
@@ -247,7 +252,8 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             
             Trace?.Invoke(this,
                 $"extrap heading={_headingDegrees:F1} offset={_headingOffsetDegrees:F1} " +
-                $"corrected={correctedHeading:F1} speed={effectiveSpeed:F1}");
+                $"corrected={correctedHeading:F1} speed={effectiveSpeed:F1} " +
+                $"since={sinceAnchor:F1} acc={accuracy:F0}");
         }
 
         _estimateProduced?.Invoke(this, sample);
