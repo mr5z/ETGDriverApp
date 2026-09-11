@@ -12,44 +12,29 @@ public enum JobStatus
     Cancelled
 }
 
-public enum OnSiteMode
-{
-    // geofence entry sets ON_SITE by itself
-    Automatic,
-
-    // geofence entry only unlocks the driver's confirm action
-    Manual
-}
-
-// OnSiteMode should come from the job payload, decided server-side. An
-// airport fence covers terminals, car parks and holding areas, so entering it
-// says little about reaching the passenger.
+// a place and the fence around it; whether it is the pickup or the dropoff
+// comes from its role in JobAssignment
 public record JobSite(
     double Latitude,
     double Longitude,
-    double GeofenceRadiusMeters,
-    OnSiteMode OnSiteMode);
+    double GeofenceRadiusMeters);
 
+// Dropoff is optional: hourly and as-directed jobs have no fixed destination
 public record JobAssignment(
     string JobId,
     JobSite Pickup,
     JobSite? Dropoff = null);
 
-public enum OnSiteTrigger
-{
-    AutomaticGeofence,
-    DriverConfirmed
-}
-
-public record OnSiteEvent(
+// recorded with ON_SITE; EntryConfidence is null when the driver confirmed
+// without a pickup entry behind it
+public record OnSiteEvidence(
     string JobId,
-    OnSiteTrigger Trigger,
-    GeofenceEventConfidence Confidence,
+    GeofenceEventConfidence? EntryConfidence,
     DateTimeOffset At);
 
 // implemented by the head project: backend sync, offline queue, local state
-internal interface IJobStatusWriter
+public interface IJobStatusWriter
 {
-    Task SetStatusAsync(string jobId, JobStatus status, OnSiteEvent? evidence = null,
+    Task SetStatusAsync(string jobId, JobStatus status, OnSiteEvidence? evidence = null,
         CancellationToken ct = default);
 }

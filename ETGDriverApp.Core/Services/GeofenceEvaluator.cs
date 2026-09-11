@@ -2,7 +2,7 @@ using ETGDriverApp.Core.Models;
 
 namespace ETGDriverApp.Core.Services;
 
-internal interface IGeofenceRegistry
+public interface IGeofenceRegistry
 {
     // replaces any region with the same Id
     void Add(IGeofenceRegion region);
@@ -14,7 +14,7 @@ internal interface IGeofenceRegistry
     IReadOnlyList<string> ActiveRegionIds { get; }
 }
 
-internal interface IGeofenceEvaluator
+public interface IGeofenceEvaluator
 {
     void OnPositionUpdated(NormalizedPosition position);
 }
@@ -98,17 +98,22 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
         NormalizedPosition position,
         List<(IGeofenceRegion, GeofenceTransition, GeofenceEventConfidence)> toRaise)
     {
-        var inside = region.Contains(position.Latitude, position.Longitude);
-
         if (!_lastKnownInside.TryGetValue(region.Id, out var wasInside))
         {
-            _lastKnownInside[region.Id] = inside;
+            var initiallyInside = region.Contains(position.Latitude, position.Longitude);
 
-            if (inside)
+            _lastKnownInside[region.Id] = initiallyInside;
+
+            if (initiallyInside)
                 _insideSince[region.Id] = position.Timestamp;
 
             return;
         }
+
+        // once inside, leaving is judged against the exit boundary
+        var inside = wasInside
+            ? region.ContainsForExit(position.Latitude, position.Longitude)
+            : region.Contains(position.Latitude, position.Longitude);
 
         var confidence = ConfidenceFor(position);
 
@@ -123,8 +128,11 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
         }
 
         // a crossing inside our own error radius is indistinguishable from drift
-        if (region.DistanceToBoundaryMeters(position.Latitude, position.Longitude)
-            < position.EffectiveRadiusMeters)
+        var distanceToBoundary = wasInside
+            ? region.DistanceToExitBoundaryMeters(position.Latitude, position.Longitude)
+            : region.DistanceToBoundaryMeters(position.Latitude, position.Longitude);
+
+        if (distanceToBoundary < position.EffectiveRadiusMeters)
             return;
 
         // dwell is measured against fix timestamps, not wall clock

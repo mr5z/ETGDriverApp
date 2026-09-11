@@ -73,8 +73,8 @@ internal partial class MainViewModel : PageViewModel
         _pipeline.LocationUnavailable += (_, e) => Append("LocationUnavailable — position no longer defensible");
         _simulator.Arrived += (_, _) => Append("Arrived at destination (holding position)");
         _statusWriter.StatusWritten += (_, message) => Append(message);
-        _jobs.OnSiteAvailable += (_, e) => Append($"ON_SITE available {e.JobId} ({e.Mode}/{e.Confidence})");
-        _jobs.OnSiteSet += (_, e) => Append($"ON_SITE set {e.JobId} via {e.Trigger}");
+        _jobs.OnSiteAvailable += (_, e) => Append($"ON_SITE available {e.JobId} ({e.Confidence})");
+        _jobs.OnSiteLeft += (_, e) => Append($"ON_SITE_ left {e.JobId} ({e.Confidence})");
         stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
@@ -114,7 +114,7 @@ internal partial class MainViewModel : PageViewModel
         var (lat, lon) = Geo.Project(Origin.Lat, Origin.Lon, bearing, distance);
         const double radius = 120;
         
-        var job = new JobAssignment(jobId, new JobSite(lat, lon, radius, OnSiteMode.Automatic));
+        var job = new JobAssignment(jobId, new JobSite(lat, lon, radius));
 
         _armed.Add(job);
         _jobs.ArmForJob(job);
