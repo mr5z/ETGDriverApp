@@ -89,7 +89,7 @@ internal partial class MainViewModel : PageViewModel
 
     public MauiLocation? CameraCenter { get; set; }
 
-    public double CameraRadiusMeters { get; set; } = 1500;
+    public double CameraRadiusMeters { get; set; } = 400;
 
     public string StatusText { get; set; } = "Idle";
 
@@ -104,8 +104,8 @@ internal partial class MainViewModel : PageViewModel
         
         // far enough that a five-minute blackout at 12 m/s (3.6 km) plus the
         // settling and reacquisition legs all fit inside one trip
-        const double minDistanceMeters = 6000;
-        const double maxDistanceMeters = 8000;
+        const double minDistanceMeters = 3000;
+        const double maxDistanceMeters = 5000;
 
         var bearing = _random.NextDouble() * 360;
         var distance = minDistanceMeters +
