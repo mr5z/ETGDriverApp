@@ -208,7 +208,7 @@ internal class JobSiteMonitor(
             centerLongitude: site.Longitude,
             radiusMeters: site.GeofenceRadiusMeters,
             onEvent: (_, transition, confidence) => onTransition(transition, confidence),
-            enterDwell: SiteDwell,
+            enterDwell: site.EnterDwell ?? SiteDwell,
             exitRadiusMeters: site.GeofenceRadiusMeters * exitRadiusFactor));
 
     // caller holds _sync

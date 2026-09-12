@@ -17,7 +17,8 @@ public enum JobStatus
 public record JobSite(
     double Latitude,
     double Longitude,
-    double GeofenceRadiusMeters);
+    double GeofenceRadiusMeters,
+    TimeSpan? EnterDwell = null);
 
 // Dropoff is optional: hourly and as-directed jobs have no fixed destination
 public record JobAssignment(

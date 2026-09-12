@@ -145,7 +145,15 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
                 return;
             }
 
-            if (position.Timestamp - since < region.EnterDwell)
+            // the dwell exists to rule out a drive-by. A trusted fix well inside the
+            // region already rules it out: a vehicle passing through is never this
+            // far in with this little uncertainty.
+            var wellInside =
+                confidence == GeofenceEventConfidence.Trusted &&
+                region.DistanceToBoundaryMeters(position.Latitude, position.Longitude)
+                > position.EffectiveRadiusMeters * 2;
+
+            if (!wellInside && position.Timestamp - since < region.EnterDwell)
                 return;
         }
 

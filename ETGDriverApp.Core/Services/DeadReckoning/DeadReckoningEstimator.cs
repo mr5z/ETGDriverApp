@@ -109,6 +109,11 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                             $"recal elapsed={elapsed:F2} travelled={travelled:F1} floor={floor:F1} " +
                             $"speed={_speedMps:F1} bias={_gyroBiasDegPerSec:F2}");
                     }
+                    else if (travelled <= floor)
+                    {
+                        // a stationary vehicle produces no usable bearing; not a rejection
+                        Trace?.Invoke(this, $"recal: travelled={travelled:F1} below floor={floor:F1}");
+                    }
                     else
                     {
                         Trace?.Invoke(this,
