@@ -192,6 +192,12 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         {
             if (tracked.InsideSince is not { } since)
             {
+                // Also the reason no enter ever fires on a single fix when a dwell is
+                // configured: the first inside fix only starts the clock. That costs the
+                // well-inside shortcut below one fix of latency, and buys protection
+                // against a lone multipath fix -- Trusted only means the state is
+                // Tracking, and a confident fix in an urban canyon can still be tens of
+                // metres out. Do not hoist the shortcut above this.
                 tracked.InsideSince = position.Timestamp;
 
                 return;

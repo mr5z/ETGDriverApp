@@ -1,4 +1,5 @@
 using ETGDriverApp.Core.Configuration;
+using ETGDriverApp.Core.Diagnostics;
 using ETGDriverApp.Core.Models;
 using Microsoft.Extensions.Options;
 
@@ -16,8 +17,11 @@ internal class StalenessWatchdog(
     IPositionFilterPipeline pipeline,
     IPositionStateMachine stateMachine,
     PositionFeed feed,
-    TimeProvider clock) : IStalenessWatchdog, IAsyncDisposable
+    TimeProvider clock,
+    IPositioningDiagnostics diagnostics) : IStalenessWatchdog, IAsyncDisposable
 {
+    private const string TraceCategory = "staleness";
+    
     private readonly CancellationTokenSource _cts = new();
     private readonly Lock _sync = new();
 
@@ -99,7 +103,7 @@ internal class StalenessWatchdog(
             }
         }
     }
-
+    
     private async Task TickAsync(CancellationToken ct)
     {
         var staleness = options.CurrentValue.Staleness;
@@ -117,12 +121,36 @@ internal class StalenessWatchdog(
         // repeated calls are intended: the filter's uncertainty grows between
         // them, so the give-up threshold is reached on a later tick
         if (sinceFix >= staleness.HardThreshold)
-            stateMachine.NotifyFixStale(pipeline.PredictUncertaintyMeters(now));
+        {
+            var uncertainty = pipeline.PredictUncertaintyMeters(now);
+
+            // The number the state machine gives up on is the filter's
+            // covariance, not the accuracy of whatever position is actually
+            // published. When a DR estimate is live those two should track
+            // each other; if they diverge, the app is discarding a position
+            // it is still publishing.
+            if (diagnostics.IsEnabled)
+            {
+                var published = pipeline.Current;
+
+                diagnostics.Trace(TraceCategory,
+                    $"stale since={sinceFix.TotalSeconds:F1}s " +
+                    $"filter={uncertainty:F0}m " +
+                    $"published={published?.EffectiveRadiusMeters:F0}m " +
+                    $"source={published?.SourceType} " +
+                    $"age={(published is null ? 0 : (now - published.Timestamp).TotalSeconds):F1}s");
+            }
+
+            stateMachine.NotifyFixStale(uncertainty);
+        }
 
         if (sinceFix >= staleness.SoftThreshold && forcedFixDue)
         {
             lock (_sync)
                 _lastForcedFixAt = now;
+
+            if (diagnostics.IsEnabled)
+                diagnostics.Trace(TraceCategory, $"forcing fix since={sinceFix.TotalSeconds:F1}s");
 
             await feed.ForcedFixAsync(ct);
         }

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ETGDriverApp.Core.Diagnostics;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services;
 using ETGDriverApp.Core.Services.Jobs;
@@ -59,6 +60,7 @@ internal partial class MainViewModel : PageViewModel
         IPositionFilterPipeline pipeline,
         IPositionStateMachine stateMachine,
         IJobSiteMonitor jobs,
+        PositioningDiagnostics diagnostics,
         SimulatedLocationListener simulator)
     {
         _session = session;
@@ -74,6 +76,7 @@ internal partial class MainViewModel : PageViewModel
         _jobs.ArrivalContradicted += OnArrivalContradicted;
         _jobs.SiteLeft += (_, e) => Append($"Left site {e.JobId} ({e.Confidence})");
         stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
+        diagnostics.Traced += OnTraced;
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
     }
@@ -330,6 +333,9 @@ internal partial class MainViewModel : PageViewModel
         if (!e.Accepted)
             Append($"Rejected {e.Sample.SourceType}: {e.Reason} {e.Diagnostics}");
     }
+    
+    private void OnTraced(object? sender, PositioningTraceEventArgs e) =>
+        MainThread.BeginInvokeOnMainThread(() => Append($"[{e.Category}] {e.Message}"));
 
     private void Append(string message) =>
         MainThread.BeginInvokeOnMainThread(() =>
