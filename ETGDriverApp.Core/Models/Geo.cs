@@ -8,17 +8,21 @@ public static class Geo
 
     public static double ToDeg(double rad) => rad * 180.0 / Math.PI;
 
-    // [0, 360)
-    public static double NormalizeDegrees(double degrees) => ((degrees % 360) + 360) % 360;
+    // C#'s % is a remainder: it keeps the sign of the dividend, so -1 % 360 is
+    // -1, not 359. Every angle helper here wants the mathematical modulo.
+    private static double Mod(double value, double modulus)
+    {
+        var remainder = value % modulus;
 
-    // Shortest signed turn from one bearing to another, in (-180, 180].
-    // Moved here out of the DR estimator, where it was an unexplained
-    // `((to - from + 540) % 360) - 180`. The 540 is 360 + 180: adding 180
-    // shifts the answer into [0, 360) so the modulo cannot go negative for
-    // reversed inputs, and the extra 360 keeps it non-negative for inputs
-    // up to a full turn apart. Subtracting 180 recentres on zero.
+        return remainder < 0 ? remainder + modulus : remainder;
+    }
+
+    public static double NormalizeDegrees(double degrees) => Mod(degrees, 360);
+
+    // Shortest signed turn, in [-180, 180). Shift by half a turn so the wrap
+    // point sits at the antipode, take the modulo, shift back.
     public static double SignedDelta(double fromDegrees, double toDegrees) =>
-        ((toDegrees - fromDegrees + 540) % 360) - 180;
+        Mod(toDegrees - fromDegrees + 180, 360) - 180;
 
     public static double DistanceMeters(double lat1, double lon1, double lat2, double lon2)
     {

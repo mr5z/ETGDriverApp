@@ -23,8 +23,6 @@ internal class PeriodicScheduler : IPeriodicScheduler, IAsyncDisposable
 
     void IPeriodicScheduler.Start(TimeSpan interval, Func<CancellationToken, Task> onTick)
     {
-        CancellationToken token;
-
         lock (_sync)
         {
             if (_running)
@@ -34,10 +32,17 @@ internal class PeriodicScheduler : IPeriodicScheduler, IAsyncDisposable
             _interval = interval;
             _timer = new PeriodicTimer(interval);
             _cts = new CancellationTokenSource();
-            token = _cts.Token;
-        }
 
-        _loop = Task.Run(() => RunAsync(onTick, token));
+            var token = _cts.Token;
+            var timer = _timer;
+
+            // Assigned inside the lock. It used to be set after the lock was
+            // released, which left a window where StopAsync could capture a
+            // null _loop, skip the await and return while the tick callback
+            // was still running - so a caller that stopped and immediately
+            // disposed its collaborators could be called back afterwards.
+            _loop = Task.Run(() => RunAsync(timer, onTick, token), token);
+        }
     }
 
     void IPeriodicScheduler.SetInterval(TimeSpan interval)
@@ -60,13 +65,19 @@ internal class PeriodicScheduler : IPeriodicScheduler, IAsyncDisposable
     {
         CancellationTokenSource? cts;
         Task? loop;
+        PeriodicTimer? timer;
 
         lock (_sync)
         {
+            if (!_running)
+                return;
+
             cts = _cts;
             loop = _loop;
+            timer = _timer;
             _cts = null;
             _loop = null;
+            _timer = null;
             _running = false;
         }
 
@@ -88,37 +99,39 @@ internal class PeriodicScheduler : IPeriodicScheduler, IAsyncDisposable
 
         cts.Dispose();
 
-        lock (_sync)
-        {
-            _timer?.Dispose();
-            _timer = null;
-        }
+        // disposed only once the loop has observed cancellation and stopped
+        // awaiting it
+        timer?.Dispose();
     }
 
-    private async Task RunAsync(Func<CancellationToken, Task> onTick, CancellationToken ct)
+    // The timer is passed in rather than re-read from the field: a Start
+    // racing this loop must not be able to swap the timer out from under it.
+    private static async Task RunAsync(
+        PeriodicTimer timer, Func<CancellationToken, Task> onTick, CancellationToken ct)
     {
-        PeriodicTimer? timer;
-
-        lock (_sync)
-            timer = _timer;
-
-        if (timer is null)
-            return;
-
-        while (await timer.WaitForNextTickAsync(ct))
+        try
         {
-            try
+            while (await timer.WaitForNextTickAsync(ct))
             {
-                await onTick(ct);
+                try
+                {
+                    await onTick(ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch
+                {
+                    // one bad extrapolation must not stop the loop
+                }
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                // one bad extrapolation must not stop the loop
-            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 }

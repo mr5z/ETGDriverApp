@@ -9,6 +9,8 @@ internal interface IDeadReckoningEstimator : IAsyncDisposable
 {
     void Start();
 
+    Task StopAsync();
+
     void RecalibrateAgainst(NormalizedPosition trustedFix, double speedMps);
 
     // extrapolation runs only while active; an inactive tick leaves the
@@ -122,7 +124,14 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         });
     }
 
-    async ValueTask IAsyncDisposable.DisposeAsync()
+    Task IDeadReckoningEstimator.StopAsync() => StopCoreAsync();
+
+    // Dispose is now just "stop and never start again"; the teardown itself
+    // lives in StopCoreAsync so the end of a shift and the end of the process
+    // cannot drift apart.
+    async ValueTask IAsyncDisposable.DisposeAsync() => await StopCoreAsync();
+
+    private async Task StopCoreAsync()
     {
         lock (_sync)
         {
@@ -130,19 +139,20 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                 return;
 
             _started = false;
+
+            // a stopped estimator must not be left armed: SetActive is driven
+            // by PositionState, which keeps changing after the session ends
+            _active = false;
         }
 
         foreach (var sensor in _sensors)
         {
-            switch (sensor)
-            {
-                case IHeadingRateProvider headingRate:
-                    headingRate.HeadingRateChanged -= OnHeadingRateChanged;
-                    break;
-                case IMotionStateProvider motionState:
-                    motionState.MotionStateChanged -= OnMotionStateChanged;
-                    break;
-            }
+            // don't convert to switch statement
+            if (sensor is IHeadingRateProvider headingRate)
+                headingRate.HeadingRateChanged -= OnHeadingRateChanged;
+
+            if (sensor is IMotionStateProvider motionState)
+                motionState.MotionStateChanged -= OnMotionStateChanged;
 
             sensor.Stop();
         }
@@ -268,7 +278,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
         lock (_sync)
         {
-            if (!_hasAnchor || !_active)
+            if (!_started || !_hasAnchor || !_active)
                 return;
 
             var now = clock.GetUtcNow();
@@ -340,21 +350,52 @@ internal class DeadReckoningFeed(
     IPositionFilterPipeline pipeline,
     IPositionStateMachine stateMachine)
 {
+    private readonly Lock _sync = new();
+
     private bool _started;
 
     public event EventHandler<Exception>? BridgeFaulted;
 
+    // ReSharper disable once InconsistentlySynchronizedField
+    public bool IsRunning => _started;
+
     public void Start()
     {
-        if (_started)
-            return;
+        lock (_sync)
+        {
+            if (_started)
+                return;
 
-        _started = true;
+            _started = true;
+        }
 
         estimator.EstimateProduced += OnEstimateProduced;
         stateMachine.StateChanged += OnStateChanged;
 
         estimator.Start();
+    }
+
+    // The counterpart Start never had. Without it the feed stayed wired to
+    // the estimator and the state machine for the life of the process: after
+    // a shift ended the sensors kept streaming, the estimator kept ticking,
+    // and extrapolations were still being pushed into a pipeline nobody was
+    // watching. PositioningSession owns the shift, so it owns this call.
+    public async Task StopAsync()
+    {
+        lock (_sync)
+        {
+            if (!_started)
+                return;
+
+            _started = false;
+        }
+
+        estimator.EstimateProduced -= OnEstimateProduced;
+        stateMachine.StateChanged -= OnStateChanged;
+
+        estimator.SetActive(false);
+
+        await estimator.StopAsync();
     }
 
     // Degraded keeps DR warm so DeadReckoning continues from a live estimate.

@@ -29,6 +29,11 @@ public enum StartFailure
     NoLocationProvider
 }
 
+// Owns the lifetime of a shift. Nothing below is constructed here - every
+// collaborator is a process-lifetime singleton - so this is the only place
+// that knows when a shift begins and ends, and therefore the only place that
+// can wind the subsystems down. Start and stop must stay symmetric: the bug
+// this replaces was three subsystems started and two stopped.
 internal class PositioningSession(
     ISessionRecovery recovery,
     ILocationListener listener,
@@ -99,7 +104,12 @@ internal class PositioningSession(
         return new StartResult(true, hasBackground, recovered.RecoveredTrack);
     }
 
-    async Task IPositioningSession.StopAsync(CancellationToken ct)
+    async Task IPositioningSession.StopAsync(CancellationToken ct) => await StopCoreAsync(ct);
+
+    // One teardown path. StopAsync and the OS-kill handler used to each have
+    // their own copy, which is how they drifted: neither stopped dead
+    // reckoning, and neither unsubscribed the geofence handler.
+    private async Task StopCoreAsync(CancellationToken ct)
     {
         lock (_sync)
         {
@@ -109,8 +119,30 @@ internal class PositioningSession(
             _isRunning = false;
         }
 
+        // Order matters. The watchdog calls into PositionFeed.ForcedFixAsync,
+        // so it has to be quiet before the feed goes; dead reckoning ingests
+        // into the pipeline, so it goes before we stop listening to it.
         await watchdog.StopAsync();
+        await deadReckoningFeed.StopAsync();
         await feed.StopAsync(ct);
+
+        lock (_sync)
+        {
+            if (_subscribed)
+            {
+                // otherwise a stopped session keeps evaluating the last job's
+                // fences - a driver parked at home inside an old pickup
+                // radius could still trigger job transitions
+                pipeline.PositionUpdated -= OnPositionUpdated;
+                _subscribed = false;
+            }
+
+            if (_endSubscribed)
+            {
+                listener.SessionEndedUnexpectedly -= OnSessionEndedUnexpectedly;
+                _endSubscribed = false;
+            }
+        }
     }
 
     private void OnPositionUpdated(object? sender, NormalizedPosition position) =>
@@ -118,16 +150,9 @@ internal class PositioningSession(
 
     private async void OnSessionEndedUnexpectedly(object? sender, SessionEndReason reason)
     {
-        lock (_sync)
-        {
-            if (!_isRunning)
-                return;
-
-            _isRunning = false;
-        }
-
-        await watchdog.StopAsync();
-        await feed.StopAsync();
+        // IsRunning is already false by the time subscribers are told, which
+        // is the documented contract of the event
+        await StopCoreAsync(CancellationToken.None);
 
         _sessionEndedUnexpectedly?.Invoke(this, reason);
     }
