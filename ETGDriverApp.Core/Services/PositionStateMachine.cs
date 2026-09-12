@@ -30,10 +30,15 @@ internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
     private const double MaxUsefulUncertaintyMeters = 150;
 
     private static readonly TimeSpan ReacquisitionSettleDuration = TimeSpan.FromSeconds(5);
-    
+
     // however confident the filter is, a position no real fix has touched in
-// this long cannot be defended
+    // this long cannot be defended
     private static readonly TimeSpan MaxBlindDuration = TimeSpan.FromSeconds(90);
+
+    // matches the watchdog's HardThreshold. The watchdog reads its own copy
+    // of the last fix time, so a fix can land between its check and the
+    // NotifyFixStale call; this timestamp is the authoritative one.
+    private static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(20);
 
     private readonly Lock _sync = new();
 
@@ -42,17 +47,17 @@ internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
     private bool _unavailableRaisedForCurrentEpisode;
     private PositionState _currentState = PositionState.Tracking;
 
+    private EventHandler<PositionState>? _stateChanged;
+    private EventHandler? _locationBecameUnavailable;
 
     PositionState IPositionStateMachine.CurrentState => _currentState;
 
-    private EventHandler<PositionState>? _stateChanged;
     event EventHandler<PositionState> IPositionStateMachine.StateChanged
     {
         add => _stateChanged += value;
         remove => _stateChanged -= value;
     }
 
-    private EventHandler? _locationBecameUnavailable;
     event EventHandler IPositionStateMachine.LocationBecameUnavailable
     {
         add => _locationBecameUnavailable += value;
@@ -108,17 +113,31 @@ internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
 
         lock (_sync)
         {
+            var now = clock.GetUtcNow();
+
+            // a real fix arrived after the watchdog decided we were stale
+            if (_lastRealFixAt is { } recent && now - recent < StaleAfter)
+                return;
+
             _reacquiringSince = null;
 
+            // on the tick that first enters DeadReckoning, the uncertainty
+            // passed in is the filter's unaided prediction: its covariance
+            // grows with the fourth power of the gap, so it clears the
+            // threshold within seconds. DR has not fed the filter yet at
+            // this point, so give it one watchdog interval to aid it.
+            var wasAlreadyDeadReckoning = _currentState == PositionState.DeadReckoning;
+
             transitioned = SetState(PositionState.DeadReckoning);
-            
+
             var blindFor = _lastRealFixAt is { } last
-                ? clock.GetUtcNow() - last
+                ? now - last
                 : TimeSpan.Zero;
 
             var unusable =
-                uncertaintyRadiusMeters >= MaxUsefulUncertaintyMeters ||
-                blindFor >= MaxBlindDuration;
+                wasAlreadyDeadReckoning &&
+                (uncertaintyRadiusMeters >= MaxUsefulUncertaintyMeters ||
+                 blindFor >= MaxBlindDuration);
 
             // a stationary vehicle keeps its uncertainty low and stays
             // usable; one at speed passes the threshold quickly
@@ -175,7 +194,7 @@ internal class PositionStateMachine(TimeProvider clock) : IPositionStateMachine
         if (transitioned is { } state)
             _stateChanged?.Invoke(this, state);
     }
-    
+
     // When the world was last actually observed, which is the fix's own
     // timestamp rather than the moment we processed it: a background wake
     // delivers a batch of minutes-old fixes at once, and treating those as

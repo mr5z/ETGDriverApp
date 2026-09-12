@@ -46,15 +46,15 @@ internal class JobSiteMonitor(
     private readonly HashSet<string> _onSite = [];
     private readonly HashSet<string> _left = [];
 
-
     private EventHandler<OnSiteAvailableEventArgs>? _onSiteAvailable;
+    private EventHandler<OnSiteLeftEventArgs>? _onSiteLeft;
+
     event EventHandler<OnSiteAvailableEventArgs> IJobSiteMonitor.OnSiteAvailable
     {
         add => _onSiteAvailable += value;
         remove => _onSiteAvailable -= value;
     }
 
-    private EventHandler<OnSiteLeftEventArgs>? _onSiteLeft;
     event EventHandler<OnSiteLeftEventArgs> IJobSiteMonitor.OnSiteLeft
     {
         add => _onSiteLeft += value;

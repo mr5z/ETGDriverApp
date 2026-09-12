@@ -45,10 +45,11 @@ internal partial class MainViewModel : PageViewModel
     private readonly NoOpJobStatusWriter _statusWriter;
     private readonly Random _random = new();
     private readonly List<JobAssignment> _armed = [];
-    private NormalizedPosition? _lastPosition;
 
-    public string? OnSiteJobId => NearestArmedJobId();
-    public ObservableCollection<MapCircleViewModel> MapCircles { get; } = [];
+    // jobs the monitor has cleared for confirmation; only touched on the main thread
+    private readonly HashSet<string> _onSiteAvailable = [];
+
+    private NormalizedPosition? _lastPosition;
 
     private MapPointViewModel? _driverPin;
     private (double Lat, double Lon)? _destination;
@@ -70,19 +71,23 @@ internal partial class MainViewModel : PageViewModel
 
         _pipeline.PositionUpdated += OnPositionUpdated;
         _pipeline.PositionEvaluated += OnPositionEvaluated;
-        _pipeline.LocationUnavailable += (_, e) => Append("LocationUnavailable — position no longer defensible");
+        _pipeline.LocationUnavailable += (_, _) => Append("LocationUnavailable — position no longer defensible");
         _simulator.Arrived += (_, _) => Append("Arrived at destination (holding position)");
         _statusWriter.StatusWritten += (_, message) => Append(message);
-        _jobs.OnSiteAvailable += (_, e) => Append($"ON_SITE available {e.JobId} ({e.Confidence})");
-        _jobs.OnSiteLeft += (_, e) => Append($"ON_SITE_ left {e.JobId} ({e.Confidence})");
+        _jobs.OnSiteAvailable += OnSiteAvailable;
+        _jobs.OnSiteLeft += (_, e) => Append($"ON_SITE left {e.JobId} ({e.Confidence})");
         stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
-        
+
         HeadingIntegrationDeadReckoningEstimator.Trace += (_, message) => Append(message);
     }
 
+    public string? OnSiteJobId => _onSiteAvailable.FirstOrDefault();
+
     public ObservableCollection<MapPointViewModel> MapPoints { get; } = [];
+
+    public ObservableCollection<MapCircleViewModel> MapCircles { get; } = [];
 
     // your logs go here
     public ObservableCollection<string> LogEntries { get; } = [];
@@ -101,7 +106,7 @@ internal partial class MainViewModel : PageViewModel
     private void AddRandomJob()
     {
         var jobId = $"SIM-{_random.Next(1000, 9999)}";
-        
+
         // far enough that a five-minute blackout at 12 m/s (3.6 km) plus the
         // settling and reacquisition legs all fit inside one trip
         const double minDistanceMeters = 3000;
@@ -113,7 +118,7 @@ internal partial class MainViewModel : PageViewModel
 
         var (lat, lon) = Geo.Project(Origin.Lat, Origin.Lon, bearing, distance);
         const double radius = 120;
-        
+
         var job = new JobAssignment(jobId, new JobSite(lat, lon, radius));
 
         _armed.Add(job);
@@ -127,7 +132,7 @@ internal partial class MainViewModel : PageViewModel
             Label = $"Pickup {jobId}",
             Detail = $"r={radius:F0}m"
         });
-        
+
         MapCircles.Add(new MapCircleViewModel
         {
             Center = new MauiLocation(lat, lon),
@@ -149,7 +154,7 @@ internal partial class MainViewModel : PageViewModel
 
             return;
         }
-        
+
         _simulator.From = _lastPosition is { } p ? (p.Latitude, p.Longitude) : Origin;
         _simulator.To = _destination ?? (Origin.Lat + 0.01, Origin.Lon + 0.01);
 
@@ -161,7 +166,7 @@ internal partial class MainViewModel : PageViewModel
             ? $"Trip started -> {_simulator.To.Lat:F5},{_simulator.To.Lon:F5}"
             : $"Start failed: {result.Failure}");
     }
-    
+
     [RelayCommand]
     private void DegradeAccuracy()
     {
@@ -177,7 +182,7 @@ internal partial class MainViewModel : PageViewModel
 
         Append($"Signal blackout for {_simulator.BlackoutDuration.TotalSeconds:F0}s");
     }
-    
+
     [RelayCommand]
     private async Task RequestPermissionsAsync()
     {
@@ -196,18 +201,21 @@ internal partial class MainViewModel : PageViewModel
         if (whenInUse == PermissionStatus.Granted && !hasBackground)
             Append("Foreground-only: grant 'Allow all the time' in app Settings");
     }
-    
+
     [RelayCommand(CanExecute = nameof(CanConfirmOnSite))]
     private async Task ConfirmOnSiteAsync()
     {
-        if (NearestArmedJobId() is not { } jobId)
+        if (OnSiteJobId is not { } jobId)
             return;
 
         await _jobs.ConfirmOnSiteAsync(jobId);
 
+        _onSiteAvailable.Remove(jobId);
+        RefreshOnSite();
+
         Append($"Driver confirmed ON_SITE for {jobId}");
     }
-    
+
     [RelayCommand]
     private async Task CopyLogsAsync()
     {
@@ -221,22 +229,23 @@ internal partial class MainViewModel : PageViewModel
 
     [RelayCommand]
     private void ClearLogs() => LogEntries.Clear();
-    
-    private bool CanConfirmOnSite() => NearestArmedJobId() is not null;
-    
-    private string? NearestArmedJobId()
-    {
-        if (_lastPosition is not { } position)
-            return null;
 
-        return _armed
-            .Where(job => Geo.DistanceMeters(
-                              position.Latitude, position.Longitude,
-                              job.Pickup.Latitude, job.Pickup.Longitude)
-                          <= job.Pickup.GeofenceRadiusMeters)
-            .Select(job => job.JobId)
-            .FirstOrDefault();
+    private bool CanConfirmOnSite() => OnSiteJobId is not null;
+
+    private void RefreshOnSite()
+    {
+        ConfirmOnSiteCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(OnSiteJobId)));
     }
+
+    private void OnSiteAvailable(object? sender, OnSiteAvailableEventArgs e) =>
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            _onSiteAvailable.Add(e.JobId);
+            RefreshOnSite();
+
+            Append($"ON_SITE available {e.JobId} ({e.Confidence})");
+        });
 
     private async Task StopTripAsync()
     {
@@ -258,7 +267,7 @@ internal partial class MainViewModel : PageViewModel
 
             if (_driverPin is not null)
                 MapPoints.Remove(_driverPin);
-            
+
             if (_accuracyCircle is not null)
                 MapCircles.Remove(_accuracyCircle);
 
@@ -270,7 +279,7 @@ internal partial class MainViewModel : PageViewModel
                 Detail = position.State.ToString()
             };
             MapPoints.Add(_driverPin);
-            
+
             _accuracyCircle = new MapCircleViewModel
             {
                 Center = location,
@@ -284,13 +293,10 @@ internal partial class MainViewModel : PageViewModel
             CameraRadiusMeters = 1500;
             StatusText = $"{position.State} · ±{position.EffectiveRadiusMeters:F0}m · " +
                          $"{position.Latitude:F5},{position.Longitude:F5}";
-            
-            ConfirmOnSiteCommand.NotifyCanExecuteChanged();
-            OnPropertyChanged(new PropertyChangedEventArgs(nameof(OnSiteJobId)));
-            
+
             if (position.SourceType == PositionSourceType.DeadReckoned)
                 Append($"DR estimate {position.Latitude:F5},{position.Longitude:F5}");
-            
+
             if (position.SourceType == PositionSourceType.DeadReckoned &&
                 _simulator.LastEmitted is { } truth)
             {
@@ -300,7 +306,7 @@ internal partial class MainViewModel : PageViewModel
                 Append($"DR error {error:F0}m");
             }
         });
-    
+
     private void OnPositionEvaluated(object? sender, PositionEvaluatedEventArgs e)
     {
         if (!e.Accepted)

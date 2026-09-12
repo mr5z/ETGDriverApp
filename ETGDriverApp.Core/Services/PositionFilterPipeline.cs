@@ -14,11 +14,11 @@ public interface IPositionFilterPipeline
 
     // returns the position this sample produced, or null if it was rejected
     Task<NormalizedPosition?> IngestAsync(RawPositionSample sample, CancellationToken ct = default);
-    
+
     // advances the filter to now and returns its current uncertainty.
     // Predicting is a real state change: the covariance grows.
     double PredictUncertaintyMeters(DateTimeOffset now);
-    
+
     // seeds the filter from a persisted position after a restart; the gap
     // widens the covariance so the first real fix dominates
     void SeedFrom(NormalizedPosition position, TimeSpan gap);
@@ -106,7 +106,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
                 return null;
             }
-                
+
             // DR is derived from the filter's own past output; feeding it back while
             // real fixes are arriving is circular. Discard before touching the filter:
             // Predict is a state change, and the covariance growth it produces depends
@@ -125,7 +125,14 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
                 return null;
             }
 
-            if (!_filter.IsInitialized)
+            // During DeadReckoning the filter has been fed only extrapolations.
+            // Judging the first real fix against them locks out recovery
+            // whenever DR has drifted, so the real fix re-anchors instead.
+            var reanchor =
+                sample.SourceType != PositionSourceType.DeadReckoned &&
+                _stateMachine.CurrentState == PositionState.DeadReckoning;
+
+            if (!_filter.IsInitialized || reanchor)
             {
                 // a DR estimate cannot seed the filter; it has no anchor of
                 // its own to offer
@@ -162,7 +169,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             var matched = await _mapMatcher.SnapToRoadAsync(filtered, ct);
 
             _stateMachine.NotifyFixAccepted(matched, tier);
-            
+
             // the filter is the authoritative velocity source; DR only needs
             // an anchor and a speed to extrapolate from
             if (tier == AccuracyTier.Good && sample.SourceType != PositionSourceType.DeadReckoned)
@@ -175,7 +182,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             };
 
             Volatile.Write(ref _published, result);
-            
+
             if (sample.SourceType != PositionSourceType.DeadReckoned)
                 _lastAcceptedTimestamp = sample.Timestamp;
 
@@ -189,7 +196,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             _gate.Release();
         }
     }
-    
+
     double IPositionFilterPipeline.PredictUncertaintyMeters(DateTimeOffset now)
     {
         // the watchdog must not block behind an in-flight ingest, and a
@@ -213,7 +220,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             _gate.Release();
         }
     }
-    
+
     void IPositionFilterPipeline.SeedFrom(NormalizedPosition position, TimeSpan gap)
     {
         _gate.Wait();
