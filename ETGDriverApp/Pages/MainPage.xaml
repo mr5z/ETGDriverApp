@@ -50,7 +50,7 @@
                         Command="{Binding ToggleTripCommand}" />
 
                 <Button Grid.Row="0" Grid.Column="2"
-                        Text="On Site"
+                        Text="{Binding OnSiteButtonText}"
                         FontSize="12"
                         Padding="6,8"
                         Command="{Binding ConfirmOnSiteCommand}" />

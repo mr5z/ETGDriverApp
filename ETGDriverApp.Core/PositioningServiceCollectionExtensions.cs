@@ -34,7 +34,6 @@ public static class PositioningServiceCollectionExtensions
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IValidateOptions<PositioningOptions>, PositioningOptionsValidator>());
 
-        // replaces HeadingIntegrationDeadReckoningEstimator's static Trace event
         services.AddSingleton<PositioningDiagnostics>();
         services.AddSingleton<IPositioningDiagnostics>(
             sp => sp.GetRequiredService<PositioningDiagnostics>());
@@ -44,10 +43,6 @@ public static class PositioningServiceCollectionExtensions
         services.AddSingleton<IAccuracyGate, AccuracyGate>();
         services.AddSingleton<IPlausibilityGate, PlausibilityGate>();
         services.AddSingleton<IMapMatcher, NoOpMapMatcher>();
-
-        // Removed: commented-out registrations for IPositionBlender,
-        // IPositionSmoother and ISpeedSanityChecker. The interfaces are gone
-        // too; the Kalman filter and PlausibilityGate do that work now.
 
         services.AddSingleton<DeviceOrientationReference>();
         services.AddSingleton<IPeriodicScheduler, PeriodicScheduler>();
@@ -70,7 +65,6 @@ public static class PositioningServiceCollectionExtensions
         services.AddSingleton<IGeofenceEvaluator>(sp => sp.GetRequiredService<GeofenceEvaluator>());
         services.AddSingleton<IGeofenceRegistry>(sp => sp.GetRequiredService<GeofenceEvaluator>());
 
-        // IJobStatusWriter must come from the head project
         services.AddSingleton<IJobSiteMonitor, JobSiteMonitor>();
 
         return services;

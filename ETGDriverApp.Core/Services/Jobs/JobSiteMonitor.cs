@@ -6,30 +6,42 @@ public interface IJobSiteMonitor
 
     void DisarmJob(string jobId);
 
-    // the driver's confirm action; the only way ON_SITE is set
-    Task ConfirmOnSiteAsync(string jobId, CancellationToken ct = default);
+    // The driver's confirm action. Synchronous and inbound: nothing is
+    // written anywhere, so nothing can fail, so there is no rollback to get
+    // wrong. Returns the stamped assertion, or null if the job is not armed
+    // or was already confirmed.
+    ArrivalConfirmation? ConfirmArrival(string jobId);
 
-    // the driver has been at the pickup long enough to confirm ON_SITE
-    event EventHandler<OnSiteAvailableEventArgs> OnSiteAvailable;
+    ArrivalConfirmation? ConfirmationFor(string jobId);
 
-    // the vehicle left the pickup after ON_SITE; the consumer decides what
-    // that means (en route to dropoff, no-show, ignore)
-    event EventHandler<OnSiteLeftEventArgs> OnSiteLeft;
+    // an arrival worth offering to the driver. Confidence can be Suppressed:
+    // seen under dead reckoning and not corroborated by a real fix yet
+    event EventHandler<ArrivalAvailableEventArgs> ArrivalAvailable;
+
+    // better evidence has moved against something the driver already
+    // confirmed. The confirmation is dropped before this is raised
+    event EventHandler<ArrivalContradictedEventArgs> ArrivalContradicted;
+
+    // the vehicle left the pickup after a confirmed arrival; the consumer
+    // decides what that means (en route to dropoff, no-show, ignore)
+    event EventHandler<SiteLeftEventArgs> SiteLeft;
 }
 
-public record OnSiteAvailableEventArgs(
+public record ArrivalAvailableEventArgs(
     string JobId,
     GeofenceEventConfidence Confidence);
 
-public record OnSiteLeftEventArgs(
+public record ArrivalContradictedEventArgs(
+    string JobId,
+    ArrivalConfirmation Dropped,
+    DateTimeOffset At);
+
+public record SiteLeftEventArgs(
     string JobId,
     GeofenceEventConfidence Confidence,
     DateTimeOffset At);
 
-internal class JobSiteMonitor(
-    IGeofenceRegistry registry,
-    IJobStatusWriter statusWriter,
-    TimeProvider clock) : IJobSiteMonitor
+internal class JobSiteMonitor : IJobSiteMonitor
 {
     private static readonly TimeSpan SiteDwell = TimeSpan.FromSeconds(30);
 
@@ -37,28 +49,52 @@ internal class JobSiteMonitor(
     // departure
     private const double PickupExitRadiusFactor = 1.5;
 
+    private readonly IGeofenceRegistry _registry;
+    private readonly TimeProvider _clock;
+
     private readonly Lock _sync = new();
     private readonly Dictionary<string, JobAssignment> _armed = [];
 
     // confidence of the pickup entry the driver is currently inside, kept as
-    // evidence for the confirm
+    // the evidence a confirmation would rest on
     private readonly Dictionary<string, GeofenceEventConfidence> _pickupEntryConfidence = [];
-    private readonly HashSet<string> _onSite = [];
+    private readonly Dictionary<string, ArrivalConfirmation> _confirmed = [];
     private readonly HashSet<string> _left = [];
 
-    private EventHandler<OnSiteAvailableEventArgs>? _onSiteAvailable;
-    private EventHandler<OnSiteLeftEventArgs>? _onSiteLeft;
-
-    event EventHandler<OnSiteAvailableEventArgs> IJobSiteMonitor.OnSiteAvailable
+    public JobSiteMonitor(
+        IGeofenceRegistry registry,
+        IGeofenceEvaluator evaluator,
+        TimeProvider clock)
     {
-        add => _onSiteAvailable += value;
-        remove => _onSiteAvailable -= value;
+        _registry = registry;
+        _clock = clock;
+
+        // Observations arrive before transitions for the same position, so a
+        // confirmation contradicted by this fix is already gone by the time
+        // the resulting Exited lands - which is what stops a bogus arrival
+        // from looking like a departure.
+        evaluator.Observed += OnObserved;
     }
 
-    event EventHandler<OnSiteLeftEventArgs> IJobSiteMonitor.OnSiteLeft
+    private EventHandler<ArrivalAvailableEventArgs>? _arrivalAvailable;
+    event EventHandler<ArrivalAvailableEventArgs> IJobSiteMonitor.ArrivalAvailable
     {
-        add => _onSiteLeft += value;
-        remove => _onSiteLeft -= value;
+        add => _arrivalAvailable += value;
+        remove => _arrivalAvailable -= value;
+    }
+
+    private EventHandler<ArrivalContradictedEventArgs>? _arrivalContradicted;
+    event EventHandler<ArrivalContradictedEventArgs> IJobSiteMonitor.ArrivalContradicted
+    {
+        add => _arrivalContradicted += value;
+        remove => _arrivalContradicted -= value;
+    }
+
+    private EventHandler<SiteLeftEventArgs>? _siteLeft;
+    event EventHandler<SiteLeftEventArgs> IJobSiteMonitor.SiteLeft
+    {
+        add => _siteLeft += value;
+        remove => _siteLeft -= value;
     }
 
     void IJobSiteMonitor.ArmForJob(JobAssignment job)
@@ -84,42 +120,76 @@ internal class JobSiteMonitor(
             ClearJobState(jobId);
         }
 
-        registry.RemoveWhere(r => r.Id.StartsWith($"job:{jobId}:", StringComparison.Ordinal));
+        _registry.RemoveWhere(r => r.Id.StartsWith($"job:{jobId}:", StringComparison.Ordinal));
     }
 
-    async Task IJobSiteMonitor.ConfirmOnSiteAsync(string jobId, CancellationToken ct)
+    ArrivalConfirmation? IJobSiteMonitor.ConfirmArrival(string jobId)
     {
-        GeofenceEventConfidence? entryConfidence;
-
         lock (_sync)
         {
             if (!_armed.ContainsKey(jobId))
-                return;
+                return null;
 
-            // latch, so a double tap is a no-op
-            if (!_onSite.Add(jobId))
-                return;
+            // a double tap is a no-op, and returns nothing rather than a
+            // second confirmation with a later timestamp
+            if (_confirmed.ContainsKey(jobId))
+                return null;
 
-            entryConfidence = _pickupEntryConfidence.TryGetValue(jobId, out var confidence)
+            var basis = _pickupEntryConfidence.TryGetValue(jobId, out var confidence)
                 ? confidence
-                : null;
+                : (GeofenceEventConfidence?)null;
+
+            var confirmation = new ArrivalConfirmation(
+                PickupRegionId(jobId), basis, _clock.GetUtcNow());
+
+            _confirmed[jobId] = confirmation;
+
+            return confirmation;
         }
+    }
 
-        var evidence = new OnSiteEvidence(jobId, entryConfidence, clock.GetUtcNow());
+    ArrivalConfirmation? IJobSiteMonitor.ConfirmationFor(string jobId)
+    {
+        lock (_sync)
+            return _confirmed.GetValueOrDefault(jobId);
+    }
 
-        try
+    // Every position, every armed region. The only work done here is asking
+    // whether fresh evidence has moved against a confirmation we are holding.
+    private void OnObserved(object? sender, RegionObservation observation)
+    {
+        string? contradictedJob = null;
+        ArrivalConfirmation? dropped = null;
+
+        lock (_sync)
         {
-            await statusWriter.SetStatusAsync(jobId, JobStatus.OnSite, evidence, ct);
-        }
-        catch
-        {
-            // un-latch so the driver can retry rather than being stuck
-            // showing ON_SITE locally
-            lock (_sync)
-                _onSite.Remove(jobId);
+            foreach (var (jobId, confirmation) in _confirmed)
+            {
+                if (confirmation.RegionId != observation.RegionId)
+                    continue;
 
-            throw;
+                if (ArrivalStanding.Evaluate(confirmation, observation)
+                    is not ConfirmationStanding.Contradicted)
+                    break;
+
+                contradictedJob = jobId;
+                dropped = confirmation;
+
+                break;
+            }
+
+            if (contradictedJob is null)
+                return;
+
+            _confirmed.Remove(contradictedJob);
+            _pickupEntryConfidence.Remove(contradictedJob);
+
+            // _left is untouched: an arrival that never happened cannot have
+            // produced a departure
         }
+
+        _arrivalContradicted?.Invoke(
+            this, new ArrivalContradictedEventArgs(contradictedJob, dropped!, observation.At));
     }
 
     private void OnPickupTransition(
@@ -144,13 +214,22 @@ internal class JobSiteMonitor(
             if (!_armed.ContainsKey(jobId))
                 return;
 
-            if (_onSite.Contains(jobId))
+            if (_confirmed.ContainsKey(jobId))
                 return;
 
-            _pickupEntryConfidence[jobId] = confidence;
+            // An enter can be re-raised as the evidence for it improves:
+            // Suppressed under DR, then LowConfidence once a real fix backs
+            // it up. Only ever move up - a later DR re-entry must not
+            // downgrade an arrival a trusted fix already established.
+            _pickupEntryConfidence[jobId] =
+                _pickupEntryConfidence.TryGetValue(jobId, out var existing) && existing > confidence
+                    ? existing
+                    : confidence;
+
+            confidence = _pickupEntryConfidence[jobId];
         }
 
-        _onSiteAvailable?.Invoke(this, new OnSiteAvailableEventArgs(jobId, confidence));
+        _arrivalAvailable?.Invoke(this, new ArrivalAvailableEventArgs(jobId, confidence));
     }
 
     private void OnPickupExited(string jobId, GeofenceEventConfidence confidence)
@@ -162,9 +241,9 @@ internal class JobSiteMonitor(
             if (!_armed.TryGetValue(jobId, out job))
                 return;
 
-            // leaving before ON_SITE is just driving past; the entry no
-            // longer counts as evidence
-            if (!_onSite.Contains(jobId))
+            // leaving before the driver confirmed is just driving past; the
+            // entry no longer counts as evidence
+            if (!_confirmed.ContainsKey(jobId))
             {
                 _pickupEntryConfidence.Remove(jobId);
 
@@ -176,7 +255,7 @@ internal class JobSiteMonitor(
         }
 
         // the pickup has no further role once left
-        registry.Remove(PickupRegionId(jobId));
+        _registry.Remove(PickupRegionId(jobId));
 
         // registered only now, so a nearby dropoff can't fire while the
         // driver is still waiting at the pickup
@@ -188,10 +267,13 @@ internal class JobSiteMonitor(
                 (transition, c) => OnDropoffTransition(jobId, transition, c));
         }
 
-        _onSiteLeft?.Invoke(this, new OnSiteLeftEventArgs(jobId, confidence, clock.GetUtcNow()));
+        _siteLeft?.Invoke(this, new SiteLeftEventArgs(jobId, confidence, _clock.GetUtcNow()));
     }
 
-    // TODO: dropoff arrival; a placeholder until its behavior is defined
+    // TODO: dropoff arrival; a placeholder until its behavior is defined.
+    // Note it is the same shape as the pickup - an arrival, a confirmation,
+    // a standing check - so it should reuse them rather than grow a parallel
+    // set of fields.
     private void OnDropoffTransition(
         string jobId, GeofenceTransition transition, GeofenceEventConfidence confidence)
     {
@@ -202,7 +284,7 @@ internal class JobSiteMonitor(
         JobSite site,
         Action<GeofenceTransition, GeofenceEventConfidence> onTransition,
         double exitRadiusFactor = 1.0) =>
-        registry.Add(new CircularGeofenceRegion(
+        _registry.Add(new CircularGeofenceRegion(
             id: regionId,
             centerLatitude: site.Latitude,
             centerLongitude: site.Longitude,
@@ -215,7 +297,7 @@ internal class JobSiteMonitor(
     private void ClearJobState(string jobId)
     {
         _pickupEntryConfidence.Remove(jobId);
-        _onSite.Remove(jobId);
+        _confirmed.Remove(jobId);
         _left.Remove(jobId);
     }
 

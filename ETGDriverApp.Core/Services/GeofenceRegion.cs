@@ -2,9 +2,25 @@ using ETGDriverApp.Core.Models;
 
 namespace ETGDriverApp.Core.Services;
 
+// Only movements. There is deliberately no "retracted" member: a crossing
+// that turns out to be wrong is not a third kind of movement, it is a later
+// observation disagreeing with an earlier one, and only the consumer knows
+// what it did on the earlier one.
 public enum GeofenceTransition { Entered, Exited }
 
 public enum GeofenceEventConfidence { Suppressed, LowConfidence, Trusted }
+
+// What the evaluator saw for one region on one position, before any
+// transition logic is applied. Emitted on every position for every tracked
+// region, so a consumer holding a belief of its own can test that belief
+// against fresh evidence without re-implementing the geometry.
+public record RegionObservation(
+    string RegionId,
+    bool Inside,
+    double DistanceToBoundaryMeters,
+    double EffectiveRadiusMeters,
+    GeofenceEventConfidence Confidence,
+    DateTimeOffset At);
 
 public interface IGeofenceRegion
 {

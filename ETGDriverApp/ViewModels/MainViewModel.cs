@@ -3,7 +3,6 @@ using System.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services;
-using ETGDriverApp.Core.Services.DeadReckoning;
 using ETGDriverApp.Core.Services.Jobs;
 using ETGDriverApp.Services;
 using Nkraft.MvvmEssentials.ViewModels;
@@ -42,12 +41,12 @@ internal partial class MainViewModel : PageViewModel
     private readonly IPositionFilterPipeline _pipeline;
     private readonly IJobSiteMonitor _jobs;
     private readonly SimulatedLocationListener _simulator;
-    private readonly NoOpJobStatusWriter _statusWriter;
     private readonly Random _random = new();
     private readonly List<JobAssignment> _armed = [];
 
-    // jobs the monitor has cleared for confirmation; only touched on the main thread
-    private readonly HashSet<string> _onSiteAvailable = [];
+    // jobs with an arrival worth offering, against the confidence behind
+    // each one; only touched on the main thread
+    private readonly Dictionary<string, GeofenceEventConfidence> _arrivalAvailable = [];
 
     private NormalizedPosition? _lastPosition;
 
@@ -60,28 +59,35 @@ internal partial class MainViewModel : PageViewModel
         IPositionFilterPipeline pipeline,
         IPositionStateMachine stateMachine,
         IJobSiteMonitor jobs,
-        SimulatedLocationListener simulator,
-        NoOpJobStatusWriter statusWriter)
+        SimulatedLocationListener simulator)
     {
         _session = session;
         _pipeline = pipeline;
         _jobs = jobs;
         _simulator = simulator;
-        _statusWriter = statusWriter;
 
         _pipeline.PositionUpdated += OnPositionUpdated;
         _pipeline.PositionEvaluated += OnPositionEvaluated;
         _pipeline.LocationUnavailable += (_, _) => Append("LocationUnavailable — position no longer defensible");
         _simulator.Arrived += (_, _) => Append("Arrived at destination (holding position)");
-        _statusWriter.StatusWritten += (_, message) => Append(message);
-        _jobs.OnSiteAvailable += OnSiteAvailable;
-        _jobs.OnSiteLeft += (_, e) => Append($"ON_SITE left {e.JobId} ({e.Confidence})");
+        _jobs.ArrivalAvailable += OnArrivalAvailable;
+        _jobs.ArrivalContradicted += OnArrivalContradicted;
+        _jobs.SiteLeft += (_, e) => Append($"Left site {e.JobId} ({e.Confidence})");
         stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
     }
 
-    public string? OnSiteJobId => _onSiteAvailable.FirstOrDefault();
+    public string? OnSiteJobId => _arrivalAvailable.Keys.FirstOrDefault();
+
+    // The button stays tappable on an unverified arrival, but says so. The
+    // driver can see out of the windscreen; the positioning stack cannot.
+    public string OnSiteButtonText =>
+        OnSiteJobId is { } jobId &&
+        _arrivalAvailable.TryGetValue(jobId, out var confidence) &&
+        confidence != GeofenceEventConfidence.Trusted
+            ? "On Site?"
+            : "On Site";
 
     public ObservableCollection<MapPointViewModel> MapPoints { get; } = [];
 
@@ -200,18 +206,21 @@ internal partial class MainViewModel : PageViewModel
             Append("Foreground-only: grant 'Allow all the time' in app Settings");
     }
 
+    // No longer async: confirming writes nothing, so there is nothing to
+    // await and nothing to roll back.
     [RelayCommand(CanExecute = nameof(CanConfirmOnSite))]
-    private async Task ConfirmOnSiteAsync()
+    private void ConfirmOnSite()
     {
         if (OnSiteJobId is not { } jobId)
             return;
 
-        await _jobs.ConfirmOnSiteAsync(jobId);
+        if (_jobs.ConfirmArrival(jobId) is not { } confirmation)
+            return;
 
-        _onSiteAvailable.Remove(jobId);
+        _arrivalAvailable.Remove(jobId);
         RefreshOnSite();
 
-        Append($"Driver confirmed ON_SITE for {jobId}");
+        Append($"Driver confirmed arrival {jobId} (basis {confirmation.BasisConfidence?.ToString() ?? "none"})");
     }
 
     [RelayCommand]
@@ -234,15 +243,26 @@ internal partial class MainViewModel : PageViewModel
     {
         ConfirmOnSiteCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(new PropertyChangedEventArgs(nameof(OnSiteJobId)));
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(OnSiteButtonText)));
     }
 
-    private void OnSiteAvailable(object? sender, OnSiteAvailableEventArgs e) =>
+    private void OnArrivalAvailable(object? sender, ArrivalAvailableEventArgs e) =>
         MainThread.BeginInvokeOnMainThread(() =>
         {
-            _onSiteAvailable.Add(e.JobId);
+            _arrivalAvailable[e.JobId] = e.Confidence;
             RefreshOnSite();
 
-            Append($"ON_SITE available {e.JobId} ({e.Confidence})");
+            Append($"Arrival available {e.JobId} ({e.Confidence})");
+        });
+
+    private void OnArrivalContradicted(object? sender, ArrivalContradictedEventArgs e) =>
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            _arrivalAvailable.Remove(e.JobId);
+            RefreshOnSite();
+
+            Append($"Arrival contradicted {e.JobId} — confirmed at {e.Dropped.At:HH:mm:ss} " +
+                   $"on {e.Dropped.BasisConfidence?.ToString() ?? "no"} evidence");
         });
 
     private async Task StopTripAsync()

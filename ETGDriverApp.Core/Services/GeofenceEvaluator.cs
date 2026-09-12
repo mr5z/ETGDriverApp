@@ -19,6 +19,12 @@ public interface IGeofenceRegistry
 public interface IGeofenceEvaluator
 {
     void OnPositionUpdated(NormalizedPosition position);
+
+    // Raised for every tracked region on every position, transition or not.
+    // Always raised before any transition for the same position, so a
+    // consumer can drop a belief that has just been contradicted before it
+    // is asked to interpret a crossing that followed from that same belief.
+    event EventHandler<RegionObservation> Observed;
 }
 
 internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
@@ -38,8 +44,10 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
 
         public DateTimeOffset? InsideSince { get; set; }
 
-        // a crossing observed during DR, held until a trusted fix confirms
-        // or contradicts it
+        // An exit observed during DR, held until a trusted fix confirms or
+        // contradicts it. Only exits are held: an unverified arrival is
+        // dispatched, because a human can be asked about it, whereas an
+        // unverified departure has no manual counterpart.
         public GeofenceTransition? PendingFromDeadReckoning { get; set; }
     }
 
@@ -47,6 +55,13 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         IGeofenceRegion Region,
         GeofenceTransition Transition,
         GeofenceEventConfidence Confidence);
+
+    private EventHandler<RegionObservation>? _observed;
+    event EventHandler<RegionObservation> IGeofenceEvaluator.Observed
+    {
+        add => _observed += value;
+        remove => _observed -= value;
+    }
 
     IReadOnlyList<string> IGeofenceRegistry.ActiveRegionIds
     {
@@ -89,18 +104,36 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
     {
         var geofence = options.CurrentValue.Geofence;
 
+        List<RegionObservation> observations = [];
         List<PendingEvent> toRaise = [];
 
         lock (_sync)
         {
             foreach (var tracked in _tracked.Values)
+            {
+                observations.Add(Observe(tracked.Region, position));
+
                 EvaluateRegion(tracked, position, geofence, toRaise);
+            }
         }
 
-        // dispatched outside the lock so a handler may arm or disarm fences
+        // dispatched outside the lock so a handler may arm or disarm fences.
+        // Observations first: see the Observed contract.
+        foreach (var observation in observations)
+            _observed?.Invoke(this, observation);
+
         foreach (var (region, transition, confidence) in toRaise)
             region.RaiseEvent(transition, confidence);
     }
+
+    private static RegionObservation Observe(IGeofenceRegion region, NormalizedPosition position) =>
+        new(
+            region.Id,
+            region.Contains(position.Latitude, position.Longitude),
+            region.DistanceToBoundaryMeters(position.Latitude, position.Longitude),
+            position.EffectiveRadiusMeters,
+            ConfidenceFor(position),
+            position.Timestamp);
 
     private static void EvaluateRegion(
         TrackedRegion tracked,
@@ -142,7 +175,16 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
             ? region.DistanceToExitBoundaryMeters(position.Latitude, position.Longitude)
             : region.DistanceToBoundaryMeters(position.Latitude, position.Longitude);
 
-        if (distanceToBoundary < position.EffectiveRadiusMeters)
+        // The drift gate exists to stop an automatic event firing on noise.
+        // A suppressed enter triggers nothing automatic - it only tells the
+        // consumer an arrival is worth offering to a human - so it is judged
+        // on containment alone. Without this exemption the gate is
+        // unsatisfiable during DR: the accumulated accuracy radius is
+        // routinely wider than a site fence, so a crossing in a dead zone
+        // would never be seen at all.
+        var offeringUnverifiedEnter = inside && confidence == GeofenceEventConfidence.Suppressed;
+
+        if (!offeringUnverifiedEnter && distanceToBoundary < position.EffectiveRadiusMeters)
             return;
 
         // dwell is measured against fix timestamps, not wall clock
@@ -174,7 +216,8 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
 
         tracked.Inside = inside;
 
-        if (confidence == GeofenceEventConfidence.Suppressed)
+        // an unverified departure is held; an unverified arrival is not
+        if (confidence == GeofenceEventConfidence.Suppressed && !inside)
         {
             tracked.PendingFromDeadReckoning = transition;
 
@@ -186,7 +229,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         toRaise.Add(new PendingEvent(region, transition, confidence));
     }
 
-    // a crossing observed during DR is held, then confirmed or rolled back
+    // an exit observed during DR is held, then confirmed or rolled back
     // against the first trusted fix
     private static void ConfirmPendingIfConsistent(
         TrackedRegion tracked,

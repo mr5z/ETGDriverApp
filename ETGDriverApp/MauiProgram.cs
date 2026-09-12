@@ -1,6 +1,5 @@
 using ETGDriverApp.Core;
 using ETGDriverApp.Core.Services;
-using ETGDriverApp.Core.Services.Jobs;
 using ETGDriverApp.Pages;
 using ETGDriverApp.Services;
 using ETGDriverApp.ViewModels;
@@ -44,8 +43,6 @@ public static class MauiProgram
 
         builder.Services.AddSingleton<SimulatedLocationListener>();
         builder.Services.AddSingleton<ILocationListener>(sp => sp.GetRequiredService<SimulatedLocationListener>());
-        builder.Services.AddSingleton<NoOpJobStatusWriter>();
-        builder.Services.AddSingleton<IJobStatusWriter>(sp => sp.GetRequiredService<NoOpJobStatusWriter>());
 
         // binds the "Positioning" section and validates it on startup
         builder.Services.AddDriverPositioning(builder.Configuration);
