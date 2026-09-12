@@ -1,6 +1,8 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services.DeadReckoning;
 using ETGDriverApp.Core.Services.Filters;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -34,13 +36,17 @@ public record PositionEvaluatedEventArgs(
 
 internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 {
+    // floor on the accuracy a persisted position is re-seeded with
+    private const double MinSeedAccuracyMeters = 1;
+
     private readonly IAccuracyGate _accuracyGate;
     private readonly IPlausibilityGate _plausibilityGate;
     private readonly IMapMatcher _mapMatcher;
     private readonly IPositionStateMachine _stateMachine;
     private readonly IDeadReckoningEstimator _deadReckoning;
+    private readonly IOptionsMonitor<PositioningOptions> _options;
 
-    private readonly PositionKalmanFilter _filter = new();
+    private readonly PositionKalmanFilter _filter;
 
     // three producers ingest concurrently: the location listener, the DR
     // timer, and forced fixes
@@ -59,13 +65,16 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         IPlausibilityGate plausibilityGate,
         IMapMatcher mapMatcher,
         IPositionStateMachine stateMachine,
-        IDeadReckoningEstimator deadReckoning)
+        IDeadReckoningEstimator deadReckoning,
+        IOptionsMonitor<PositioningOptions> options)
     {
         _accuracyGate = accuracyGate;
         _plausibilityGate = plausibilityGate;
         _mapMatcher = mapMatcher;
         _stateMachine = stateMachine;
         _deadReckoning = deadReckoning;
+        _options = options;
+        _filter = new PositionKalmanFilter(options);
 
         _stateMachine.LocationBecameUnavailable += OnLocationBecameUnavailable;
     }
@@ -93,14 +102,15 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
     async Task<NormalizedPosition?> IPositionFilterPipeline.IngestAsync(
         RawPositionSample sample, CancellationToken ct)
     {
+        var filterOptions = _options.CurrentValue.Filter;
+
         await _gate.WaitAsync(ct);
 
         try
         {
             // ordering: overlapping deliveries around a batched background
             // wake must not drag the track backwards
-            if (sample.SourceType != PositionSourceType.DeadReckoned &&
-                sample.Timestamp < _lastAcceptedTimestamp)
+            if (!sample.IsDeadReckoned && sample.Timestamp < _lastAcceptedTimestamp)
             {
                 RaiseEvaluated(sample, false, RejectionReason.OutOfOrderTimestamp);
 
@@ -112,8 +122,9 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             // Predict is a state change, and the covariance growth it produces depends
             // on the step size, so predicting on samples we reject makes uncertainty a
             // function of the DR tick rate.
-            if (sample.SourceType == PositionSourceType.DeadReckoned &&
-                _stateMachine.CurrentState != PositionState.DeadReckoning)
+            var extrapolating = _stateMachine.CurrentState == PositionState.DeadReckoning;
+
+            if (sample.IsDeadReckoned && !extrapolating)
                 return null;
 
             var tier = _accuracyGate.Classify(sample);
@@ -128,15 +139,13 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             // During DeadReckoning the filter has been fed only extrapolations.
             // Judging the first real fix against them locks out recovery
             // whenever DR has drifted, so the real fix re-anchors instead.
-            var reanchor =
-                sample.SourceType != PositionSourceType.DeadReckoned &&
-                _stateMachine.CurrentState == PositionState.DeadReckoning;
+            var reanchor = !sample.IsDeadReckoned && extrapolating;
 
             if (!_filter.IsInitialized || reanchor)
             {
                 // a DR estimate cannot seed the filter; it has no anchor of
                 // its own to offer
-                if (sample.SourceType == PositionSourceType.DeadReckoned)
+                if (sample.IsDeadReckoned)
                     return null;
 
                 _filter.Initialize(
@@ -146,18 +155,21 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             {
                 _filter.Predict(sample.Timestamp);
 
-                if (!_plausibilityGate.Accepts(sample, _filter, out var diagnostics))
+                var verdict = _plausibilityGate.Evaluate(sample, _filter);
+
+                if (!verdict.Accepted)
                 {
-                    RaiseEvaluated(sample, false, RejectionReason.ImplausibleJump, diagnostics);
+                    RaiseEvaluated(
+                        sample, false, RejectionReason.ImplausibleJump, verdict.Describe());
 
                     return null;
                 }
 
                 _filter.UpdatePosition(sample.Latitude, sample.Longitude, sample.AccuracyMeters);
 
-                if (sample.SourceType != PositionSourceType.DeadReckoned &&
+                if (!sample.IsDeadReckoned &&
                     sample is { SpeedMps: { } speed, CourseDegrees: { } course })
-                    _filter.UpdateVelocity(speed, course, speedAccuracyMps: 1.0);
+                    _filter.UpdateVelocity(speed, course, filterOptions.ReportedSpeedAccuracyMps);
             }
 
             var (lat, lon) = _filter.Position;
@@ -172,7 +184,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
             // the filter is the authoritative velocity source; DR only needs
             // an anchor and a speed to extrapolate from
-            if (tier == AccuracyTier.Good && sample.SourceType != PositionSourceType.DeadReckoned)
+            if (tier == AccuracyTier.Good && !sample.IsDeadReckoned)
                 _deadReckoning.RecalibrateAgainst(matched, _filter.SpeedMps);
 
             var result = matched with
@@ -183,7 +195,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
             Volatile.Write(ref _published, result);
 
-            if (sample.SourceType != PositionSourceType.DeadReckoned)
+            if (!sample.IsDeadReckoned)
                 _lastAcceptedTimestamp = sample.Timestamp;
 
             RaiseEvaluated(sample, true, RejectionReason.None);
@@ -232,7 +244,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
             _filter.Initialize(
                 position.Latitude, position.Longitude,
-                Math.Max(position.EffectiveRadiusMeters, 1),
+                Math.Max(position.EffectiveRadiusMeters, MinSeedAccuracyMeters),
                 position.Timestamp);
 
             // advance to now so the covariance reflects the elapsed gap
@@ -253,12 +265,11 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         _gate.Dispose();
     }
 
-    private void OnLocationBecameUnavailable(object? sender, EventArgs e)
-    {
+    private void OnLocationBecameUnavailable(object? sender, EventArgs e) =>
         _locationUnavailable?.Invoke(this, EventArgs.Empty);
-    }
 
     private void RaiseEvaluated(
         RawPositionSample sample, bool accepted, RejectionReason reason, string? diagnostics = null) =>
-        _positionEvaluated?.Invoke(this, new PositionEvaluatedEventArgs(sample, accepted, reason, diagnostics));
+        _positionEvaluated?.Invoke(
+            this, new PositionEvaluatedEventArgs(sample, accepted, reason, diagnostics));
 }

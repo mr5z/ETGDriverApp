@@ -1,31 +1,53 @@
+using ETGDriverApp.Core.Configuration;
+using ETGDriverApp.Core.Diagnostics;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services;
 using ETGDriverApp.Core.Services.DeadReckoning;
 using ETGDriverApp.Core.Services.DeadReckoning.Sensors;
 using ETGDriverApp.Core.Services.Filters;
 using ETGDriverApp.Core.Services.Jobs;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Maui.Devices.Sensors;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core;
 
-internal static class PositioningServiceCollectionExtensions
+public static class PositioningServiceCollectionExtensions
 {
     // Everything is a singleton: the pipeline, state machine and DR estimator
     // hold running state, and every subsystem must read the same instance.
-    public static IServiceCollection AddDriverPositioning(this IServiceCollection services)
+    //
+    // `configuration` is the app's root IConfiguration. The "Positioning"
+    // section is bound with ValidateOnStart, so a bad appsettings.json fails
+    // at startup rather than in the field. When the remote source is added,
+    // it becomes another IConfigurationProvider layered on top of this same
+    // root - no service in here changes.
+    public static IServiceCollection AddDriverPositioning(
+        this IServiceCollection services, IConfiguration configuration)
     {
+        services
+            .AddOptions<PositioningOptions>()
+            .Bind(configuration.GetSection(PositioningOptions.SectionName))
+            .ValidateOnStart();
+
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<PositioningOptions>, PositioningOptionsValidator>());
+
+        // replaces HeadingIntegrationDeadReckoningEstimator's static Trace event
+        services.AddSingleton<PositioningDiagnostics>();
+        services.AddSingleton<IPositioningDiagnostics>(
+            sp => sp.GetRequiredService<PositioningDiagnostics>());
+
         services.AddSingleton(TimeProvider.System);
 
-        services.AddSingleton<IAccuracyGate>(_ => new AccuracyGate());
-        services.AddSingleton<IPlausibilityGate>(_ => new PlausibilityGate());
+        services.AddSingleton<IAccuracyGate, AccuracyGate>();
+        services.AddSingleton<IPlausibilityGate, PlausibilityGate>();
         services.AddSingleton<IMapMatcher, NoOpMapMatcher>();
-        
-        // TODO delete
-        // services.AddSingleton<IPositionBlender, UncertaintyWeightedBlender>();
-        // services.AddSingleton<IPositionSmoother, InverseVarianceSmoother>();
-        // services.AddSingleton<ISpeedSanityChecker>(_ => new SpeedSanityChecker());
+
+        // Removed: commented-out registrations for IPositionBlender,
+        // IPositionSmoother and ISpeedSanityChecker. The interfaces are gone
+        // too; the Kalman filter and PlausibilityGate do that work now.
 
         services.AddSingleton<DeviceOrientationReference>();
         services.AddSingleton<IPeriodicScheduler, PeriodicScheduler>();

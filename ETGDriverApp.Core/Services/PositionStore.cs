@@ -1,4 +1,6 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -16,11 +18,8 @@ public interface IPositionStore
 
 // Does NOT survive process death, which is the store's actual purpose.
 // Placeholder for wiring and tests; back it with durable storage.
-internal class InMemoryPositionStore : IPositionStore
+internal class InMemoryPositionStore(IOptionsMonitor<PositioningOptions> options) : IPositionStore
 {
-    private static readonly TimeSpan Retention = TimeSpan.FromHours(24);
-    private const int PruneEvery = 500;
-
     private readonly List<NormalizedPosition> _positions = [];
     private readonly Lock _sync = new();
 
@@ -28,14 +27,16 @@ internal class InMemoryPositionStore : IPositionStore
 
     Task IPositionStore.PersistAsync(NormalizedPosition position, CancellationToken ct)
     {
+        var store = options.CurrentValue.Store;
+
         lock (_sync)
         {
             _positions.Add(position);
 
-            if (++_writesSincePrune >= PruneEvery)
+            if (++_writesSincePrune >= store.PruneEveryWrites)
             {
                 _writesSincePrune = 0;
-                _positions.RemoveAll(p => p.Timestamp < position.Timestamp - Retention);
+                _positions.RemoveAll(p => p.Timestamp < position.Timestamp - store.Retention);
             }
         }
 

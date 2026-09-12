@@ -1,4 +1,6 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -19,51 +21,65 @@ public interface IGeofenceEvaluator
     void OnPositionUpdated(NormalizedPosition position);
 }
 
-internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
+internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
+    : IGeofenceEvaluator, IGeofenceRegistry
 {
+    private readonly Dictionary<string, TrackedRegion> _tracked = [];
     private readonly Lock _sync = new();
-    private readonly Dictionary<string, IGeofenceRegion> _regions = [];
-    private readonly Dictionary<string, bool> _lastKnownInside = [];
-    private readonly Dictionary<string, DateTimeOffset> _insideSince = [];
-    private readonly Dictionary<string, GeofenceTransition> _pendingFromDeadReckoning = [];
+
+    private sealed class TrackedRegion(IGeofenceRegion region)
+    {
+        public IGeofenceRegion Region { get; } = region;
+
+        // null until the first position after arming establishes the
+        // baseline, so arming a fence the driver is already inside fires
+        // nothing
+        public bool? Inside { get; set; }
+
+        public DateTimeOffset? InsideSince { get; set; }
+
+        // a crossing observed during DR, held until a trusted fix confirms
+        // or contradicts it
+        public GeofenceTransition? PendingFromDeadReckoning { get; set; }
+    }
+
+    private readonly record struct PendingEvent(
+        IGeofenceRegion Region,
+        GeofenceTransition Transition,
+        GeofenceEventConfidence Confidence);
 
     IReadOnlyList<string> IGeofenceRegistry.ActiveRegionIds
     {
         get
         {
             lock (_sync)
-                return [.. _regions.Keys];
+                return [.. _tracked.Keys];
         }
     }
 
     void IGeofenceRegistry.Add(IGeofenceRegion region)
     {
         lock (_sync)
-        {
-            _regions[region.Id] = region;
-
-            // the first position after arming sets the baseline, so arming a
-            // fence the driver is already inside fires nothing
-            _lastKnownInside.Remove(region.Id);
-            _insideSince.Remove(region.Id);
-            _pendingFromDeadReckoning.Remove(region.Id);
-        }
+            _tracked[region.Id] = new TrackedRegion(region);
     }
 
     bool IGeofenceRegistry.Remove(string regionId)
     {
         lock (_sync)
-            return RemoveCore(regionId);
+            return _tracked.Remove(regionId);
     }
 
     int IGeofenceRegistry.RemoveWhere(Func<IGeofenceRegion, bool> predicate)
     {
         lock (_sync)
         {
-            var doomed = _regions.Values.Where(predicate).Select(r => r.Id).ToList();
+            var doomed = _tracked.Values
+                .Where(t => predicate(t.Region))
+                .Select(t => t.Region.Id)
+                .ToList();
 
             foreach (var id in doomed)
-                RemoveCore(id);
+                _tracked.Remove(id);
 
             return doomed.Count;
         }
@@ -71,12 +87,14 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
 
     void IGeofenceEvaluator.OnPositionUpdated(NormalizedPosition position)
     {
-        List<(IGeofenceRegion Region, GeofenceTransition Transition, GeofenceEventConfidence Confidence)> toRaise = [];
+        var geofence = options.CurrentValue.Geofence;
+
+        List<PendingEvent> toRaise = [];
 
         lock (_sync)
         {
-            foreach (var region in _regions.Values)
-                EvaluateRegion(region, position, toRaise);
+            foreach (var tracked in _tracked.Values)
+                EvaluateRegion(tracked, position, geofence, toRaise);
         }
 
         // dispatched outside the lock so a handler may arm or disarm fences
@@ -84,28 +102,20 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
             region.RaiseEvent(transition, confidence);
     }
 
-    private bool RemoveCore(string regionId)
-    {
-        _lastKnownInside.Remove(regionId);
-        _insideSince.Remove(regionId);
-        _pendingFromDeadReckoning.Remove(regionId);
-
-        return _regions.Remove(regionId);
-    }
-
-    private void EvaluateRegion(
-        IGeofenceRegion region,
+    private static void EvaluateRegion(
+        TrackedRegion tracked,
         NormalizedPosition position,
-        List<(IGeofenceRegion, GeofenceTransition, GeofenceEventConfidence)> toRaise)
+        GeofenceOptions geofence,
+        List<PendingEvent> toRaise)
     {
-        if (!_lastKnownInside.TryGetValue(region.Id, out var wasInside))
+        var region = tracked.Region;
+
+        if (tracked.Inside is not { } wasInside)
         {
             var initiallyInside = region.Contains(position.Latitude, position.Longitude);
 
-            _lastKnownInside[region.Id] = initiallyInside;
-
-            if (initiallyInside)
-                _insideSince[region.Id] = position.Timestamp;
+            tracked.Inside = initiallyInside;
+            tracked.InsideSince = initiallyInside ? position.Timestamp : null;
 
             return;
         }
@@ -120,9 +130,9 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
         if (inside == wasInside)
         {
             if (!inside)
-                _insideSince.Remove(region.Id);
+                tracked.InsideSince = null;
 
-            ConfirmPendingIfConsistent(region, inside, confidence, toRaise);
+            ConfirmPendingIfConsistent(tracked, inside, confidence, toRaise);
 
             return;
         }
@@ -138,9 +148,9 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
         // dwell is measured against fix timestamps, not wall clock
         if (inside && region.EnterDwell > TimeSpan.Zero)
         {
-            if (!_insideSince.TryGetValue(region.Id, out var since))
+            if (tracked.InsideSince is not { } since)
             {
-                _insideSince[region.Id] = position.Timestamp;
+                tracked.InsideSince = position.Timestamp;
 
                 return;
             }
@@ -151,61 +161,60 @@ internal class GeofenceEvaluator : IGeofenceEvaluator, IGeofenceRegistry
             var wellInside =
                 confidence == GeofenceEventConfidence.Trusted &&
                 region.DistanceToBoundaryMeters(position.Latitude, position.Longitude)
-                > position.EffectiveRadiusMeters * 2;
+                > position.EffectiveRadiusMeters * geofence.WellInsideRadiusMultiplier;
 
             if (!wellInside && position.Timestamp - since < region.EnterDwell)
                 return;
         }
 
         if (!inside)
-            _insideSince.Remove(region.Id);
+            tracked.InsideSince = null;
 
         var transition = inside ? GeofenceTransition.Entered : GeofenceTransition.Exited;
 
+        tracked.Inside = inside;
+
         if (confidence == GeofenceEventConfidence.Suppressed)
         {
-            _pendingFromDeadReckoning[region.Id] = transition;
-            _lastKnownInside[region.Id] = inside;
+            tracked.PendingFromDeadReckoning = transition;
 
             return;
         }
 
-        _lastKnownInside[region.Id] = inside;
-        _pendingFromDeadReckoning.Remove(region.Id);
+        tracked.PendingFromDeadReckoning = null;
 
-        toRaise.Add((region, transition, confidence));
+        toRaise.Add(new PendingEvent(region, transition, confidence));
     }
 
     // a crossing observed during DR is held, then confirmed or rolled back
     // against the first trusted fix
-    private void ConfirmPendingIfConsistent(
-        IGeofenceRegion region,
+    private static void ConfirmPendingIfConsistent(
+        TrackedRegion tracked,
         bool inside,
         GeofenceEventConfidence confidence,
-        List<(IGeofenceRegion, GeofenceTransition, GeofenceEventConfidence)> toRaise)
+        List<PendingEvent> toRaise)
     {
         if (confidence is GeofenceEventConfidence.Suppressed)
             return;
 
-        if (!_pendingFromDeadReckoning.TryGetValue(region.Id, out var pending))
+        if (tracked.PendingFromDeadReckoning is not { } pending)
             return;
 
-        _pendingFromDeadReckoning.Remove(region.Id);
+        tracked.PendingFromDeadReckoning = null;
 
         var impliedByPending = pending == GeofenceTransition.Entered;
 
         if (impliedByPending == inside)
-            toRaise.Add((region, pending, GeofenceEventConfidence.LowConfidence));
+            toRaise.Add(new PendingEvent(tracked.Region, pending, GeofenceEventConfidence.LowConfidence));
         else
-            _lastKnownInside[region.Id] = inside;
+            tracked.Inside = inside;
     }
 
     private static GeofenceEventConfidence ConfidenceFor(NormalizedPosition position) =>
         position.State switch
         {
             PositionState.DeadReckoning => GeofenceEventConfidence.Suppressed,
-            PositionState.Degraded => GeofenceEventConfidence.LowConfidence,
-            PositionState.Reacquiring => GeofenceEventConfidence.LowConfidence,
+            PositionState.Degraded or PositionState.Reacquiring => GeofenceEventConfidence.LowConfidence,
             _ => GeofenceEventConfidence.Trusted
         };
 }

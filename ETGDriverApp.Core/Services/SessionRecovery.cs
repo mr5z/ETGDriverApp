@@ -1,4 +1,6 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -19,13 +21,13 @@ internal class SessionRecovery(
     IPositionStore store,
     IPositionStateMachine stateMachine,
     IPositionFilterPipeline pipeline,
-    TimeProvider clock) : ISessionRecovery
+    TimeProvider clock,
+    IOptionsMonitor<PositioningOptions> options) : ISessionRecovery
 {
-    private static readonly TimeSpan MaxUsefulContinuity = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RecoveryWindow = TimeSpan.FromHours(12);
-
     async Task<SessionRecoveryResult> ISessionRecovery.RecoverAsync(CancellationToken ct)
     {
+        var recovery = options.CurrentValue.Recovery;
+
         var latest = await store.GetLatestAsync(ct);
 
         if (latest is null)
@@ -33,13 +35,15 @@ internal class SessionRecovery(
 
         var now = clock.GetUtcNow();
         var gap = now - latest.Timestamp;
-        var track = await store.GetSinceAsync(now - RecoveryWindow, ct);
-        
+        var track = await store.GetSinceAsync(now - recovery.RecoveryWindow, ct);
+
         // the pipeline is deliberately not seeded with the last persisted
         // position: it would be an unbounded extrapolation from a cold start
-        if (gap > MaxUsefulContinuity)
+        if (gap > recovery.MaxUsefulContinuity)
         {
-            stateMachine.NotifyFixStale(double.MaxValue);
+            // was NotifyFixStale(double.MaxValue); the sentinel meant "there
+            // is no filter state to report", which is now said directly
+            stateMachine.NotifyFixLost();
         }
         else
         {

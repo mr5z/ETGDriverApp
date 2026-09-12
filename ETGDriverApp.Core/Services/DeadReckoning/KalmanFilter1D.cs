@@ -10,7 +10,7 @@ internal class KalmanFilter1D(double initialEstimate, double initialErrorEstimat
     public double Update(double measurement)
     {
         _errorEstimate += _q;
-        double kalmanGain = _errorEstimate / (_errorEstimate + _errorMeasure);
+        var kalmanGain = _errorEstimate / (_errorEstimate + _errorMeasure);
         _estimate += kalmanGain * (measurement - _estimate);
         _errorEstimate *= (1 - kalmanGain);
         return _estimate;

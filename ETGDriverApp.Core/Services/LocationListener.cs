@@ -82,9 +82,11 @@ public class PositionFeed(
         if (location is not null)
             await IngestAndPersistAsync(ToSample(location, PositionSourceType.Forced), ct);
     }
-    
+
     internal static RawPositionSample ToSample(MauiLocation location, PositionSourceType source) =>
-        new(location.Latitude, location.Longitude, location.Accuracy ?? double.MaxValue,
+        new(location.Latitude, location.Longitude,
+            // was `location.Accuracy ?? double.MaxValue`
+            Accuracy.FromReported(location.Accuracy),
             location.Timestamp, source,
             location.Speed, location.Course);
 
@@ -100,7 +102,8 @@ public class PositionFeed(
         }
     }
 
-    private async Task IngestAndPersistAsync(RawPositionSample sample, CancellationToken ct = default)
+    private async Task IngestAndPersistAsync(
+        RawPositionSample sample, CancellationToken ct = default)
     {
         var accepted = await pipeline.IngestAsync(sample, ct);
 

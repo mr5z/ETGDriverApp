@@ -1,4 +1,6 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services.Filters;
 
@@ -6,27 +8,49 @@ namespace ETGDriverApp.Core.Services.Filters;
 // ceiling that holds regardless of what the filter believes.
 internal interface IPlausibilityGate
 {
-    bool Accepts(RawPositionSample sample, PositionKalmanFilter filter, out string diagnostics);
+    PlausibilityVerdict Evaluate(RawPositionSample sample, PositionKalmanFilter filter);
 }
 
-internal class PlausibilityGate(
-    double maxSigma = 5,
-    double maxPlausibleSpeedKph = 300) : IPlausibilityGate
+// Replaces `bool Accepts(..., out string diagnostics)`. The out-string forced
+// every caller to format a message even on the accept path, and made the
+// reason for a rejection a matter of reading prose.
+internal readonly record struct PlausibilityVerdict(
+    bool Accepted,
+    double InnovationSigma,
+    double FilterSpeedKph,
+    PlausibilityFailure Failure)
 {
-    bool IPlausibilityGate.Accepts(
-        RawPositionSample sample, PositionKalmanFilter filter, out string diagnostics)
+    public string Describe() =>
+        $"sigma={InnovationSigma:F1} filterKph={FilterSpeedKph:F0} failure={Failure}";
+}
+
+internal enum PlausibilityFailure
+{
+    None,
+    ImplausibleSpeed,
+    InnovationTooLarge
+}
+
+internal class PlausibilityGate(IOptionsMonitor<PositioningOptions> options) : IPlausibilityGate
+{
+    PlausibilityVerdict IPlausibilityGate.Evaluate(
+        RawPositionSample sample, PositionKalmanFilter filter)
     {
+        var limits = options.CurrentValue.Plausibility;
+
         var sigma = filter.PositionInnovationSigma(
             sample.Latitude, sample.Longitude, sample.AccuracyMeters);
 
         // the filter's velocity state, not a difference of positions
-        var impliedKph = filter.SpeedMps * 3.6;
+        var impliedKph = filter.SpeedMps * Units.MpsToKph;
 
-        diagnostics = $"sigma={sigma:F1} filterKph={impliedKph:F0}";
+        var failure = impliedKph > limits.MaxPlausibleSpeedKph
+            ? PlausibilityFailure.ImplausibleSpeed
+            : sigma > limits.MaxInnovationSigma
+                ? PlausibilityFailure.InnovationTooLarge
+                : PlausibilityFailure.None;
 
-        if (impliedKph > maxPlausibleSpeedKph)
-            return false;
-
-        return sigma <= maxSigma;
+        return new PlausibilityVerdict(
+            failure == PlausibilityFailure.None, sigma, impliedKph, failure);
     }
 }

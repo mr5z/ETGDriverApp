@@ -29,7 +29,7 @@ public interface IGeofenceRegion
     void RaiseEvent(GeofenceTransition transition, GeofenceEventConfidence confidence);
 }
 
-public class CircularGeofenceRegion(
+internal class CircularGeofenceRegion(
     string id,
     double centerLatitude,
     double centerLongitude,

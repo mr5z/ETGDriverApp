@@ -1,4 +1,7 @@
+using ETGDriverApp.Core.Configuration;
+using ETGDriverApp.Core.Diagnostics;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services.DeadReckoning;
 
@@ -17,26 +20,13 @@ internal interface IDeadReckoningEstimator : IAsyncDisposable
 
 // heading integration plus held speed
 internal class HeadingIntegrationDeadReckoningEstimator(
+    IOptionsMonitor<PositioningOptions> options,
     IEnumerable<IDeadReckoningSensorInput> sensors,
     IPeriodicScheduler scheduler,
-    TimeProvider clock) : IDeadReckoningEstimator
+    TimeProvider clock,
+    IPositioningDiagnostics diagnostics) : IDeadReckoningEstimator
 {
-    private const double BaseAccuracyMeters = 30;
-    private const double HeadingDriftDegPerSec = 0.5;
-    private const double SpeedErrorFraction = 0.1;
-    private const double MinTrustworthyFixErrorMeters = 10;
-
-    // integral gain for the gyro bias estimate, and a sanity cap on it
-    private const double BiasGain = 0.1;
-    private const double MaxBiasDegPerSec = 2;
-
-    private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
-
-    // offset changes over a longer span include outage catch-up, not just bias
-    private static readonly TimeSpan MaxBiasSpan = TimeSpan.FromSeconds(30);
-
-    // temporary; remove once DR speed is sorted
-    public static event EventHandler<string>? Trace;
+    private const string TraceCategory = "dr";
 
     private readonly IReadOnlyList<IDeadReckoningSensorInput> _sensors = [.. sensors];
     private readonly Lock _sync = new();
@@ -56,8 +46,9 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     private double _gyroBiasDegPerSec;
     private DateTimeOffset? _lastOffsetUpdateAt;
 
-    // error accumulated since the anchor; stopping adds none but removes none
-    private double _accuracySinceAnchor = BaseAccuracyMeters;
+    // error accumulated since the anchor; stopping adds none but removes none.
+    // Seeded on the first anchor, since the floor is configurable now.
+    private double _accuracySinceAnchor;
 
     private DateTimeOffset _lastHeadingUpdate;
     private DateTimeOffset _lastExtrapolationAt;
@@ -75,67 +66,21 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
     void IDeadReckoningEstimator.RecalibrateAgainst(NormalizedPosition trustedFix, double speedMps)
     {
+        var dr = options.CurrentValue.DeadReckoning;
+
         lock (_sync)
         {
             if (_hasAnchor)
-            {
-                var elapsed = (trustedFix.Timestamp - _lastExtrapolationAt).TotalSeconds;
-
-                if (elapsed > 0.5)
-                {
-                    var impliedHeading = Geo.BearingDegrees(
-                        _estimatedLatitude, _estimatedLongitude,
-                        trustedFix.Latitude, trustedFix.Longitude);
-
-                    var travelled = Geo.DistanceMeters(
-                        _estimatedLatitude, _estimatedLongitude,
-                        trustedFix.Latitude, trustedFix.Longitude);
-
-                    var floor = Math.Max(trustedFix.EffectiveRadiusMeters, MinTrustworthyFixErrorMeters);
-
-                    // Across an outage this bearing is a catch-up vector, not a heading: it
-                    // points from where DR drifted to where the vehicle actually is. Bound it
-                    // by how far the vehicle could plausibly have gone since the last estimate,
-                    // using the incoming filter speed as well as the held one so the first
-                    // anchored fix (when _speedMps is still 0) is not rejected.
-                    var assumedSpeed = Math.Max(_speedMps, speedMps);
-                    var reachable = assumedSpeed * elapsed + floor;
-
-                    if (travelled > floor && travelled <= reachable)
-                    {
-                        UpdateOffsetAndBias(impliedHeading, trustedFix.Timestamp);
-
-                        Trace?.Invoke(this,
-                            $"recal elapsed={elapsed:F2} travelled={travelled:F1} floor={floor:F1} " +
-                            $"speed={_speedMps:F1} bias={_gyroBiasDegPerSec:F2}");
-                    }
-                    else if (travelled <= floor)
-                    {
-                        // a stationary vehicle produces no usable bearing; not a rejection
-                        Trace?.Invoke(this, $"recal: travelled={travelled:F1} below floor={floor:F1}");
-                    }
-                    else
-                    {
-                        Trace?.Invoke(this,
-                            $"recal rejected: travelled={travelled:F1} reachable={reachable:F1}");
-                    }
-                }
-                else
-                {
-                    Trace?.Invoke(this, $"recal skipped: elapsed={elapsed:F2}");
-                }
-            }
+                TryUpdateHeadingFrom(trustedFix, speedMps, dr);
             else
-            {
-                Trace?.Invoke(this, "recal: no anchor yet");
-            }
+                Trace("recal: no anchor yet");
 
             _speedMps = speedMps;
             _estimatedLatitude = trustedFix.Latitude;
             _estimatedLongitude = trustedFix.Longitude;
             _lastExtrapolationAt = trustedFix.Timestamp;
             _anchoredAt = trustedFix.Timestamp;
-            _accuracySinceAnchor = BaseAccuracyMeters;
+            _accuracySinceAnchor = dr.BaseAccuracyMeters;
             _hasAnchor = true;
         }
     }
@@ -154,6 +99,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                 return;
 
             _started = true;
+            _accuracySinceAnchor = options.CurrentValue.DeadReckoning.BaseAccuracyMeters;
         }
 
         // subscribe to whichever capabilities are registered
@@ -168,7 +114,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             sensor.Start();
         }
 
-        scheduler.Start(TickInterval, _ =>
+        scheduler.Start(options.CurrentValue.DeadReckoning.TickInterval, _ =>
         {
             Extrapolate();
 
@@ -204,8 +150,66 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         await scheduler.StopAsync();
     }
 
+    // caller holds _sync.
+    //
+    // Extracted from the middle of RecalibrateAgainst, where it was four
+    // levels of nesting whose only purpose at three of them was to pick a
+    // different trace message. The guards now read as a sequence of reasons
+    // to give up.
+    private void TryUpdateHeadingFrom(
+        NormalizedPosition trustedFix, double speedMps, DeadReckoningOptions dr)
+    {
+        var elapsed = trustedFix.Timestamp - _lastExtrapolationAt;
+
+        if (elapsed <= dr.MinRecalibrationInterval)
+        {
+            Trace($"recal skipped: elapsed={elapsed.TotalSeconds:F2}s");
+
+            return;
+        }
+
+        var travelled = Geo.DistanceMeters(
+            _estimatedLatitude, _estimatedLongitude,
+            trustedFix.Latitude, trustedFix.Longitude);
+
+        var floor = Math.Max(trustedFix.EffectiveRadiusMeters, dr.MinTrustworthyFixErrorMeters);
+
+        if (travelled <= floor)
+        {
+            // a stationary vehicle produces no usable bearing; not a rejection
+            Trace($"recal: travelled={travelled:F1} below floor={floor:F1}");
+
+            return;
+        }
+
+        // Across an outage this bearing is a catch-up vector, not a heading: it
+        // points from where DR drifted to where the vehicle actually is. Bound it
+        // by how far the vehicle could plausibly have gone since the last estimate,
+        // using the incoming filter speed as well as the held one so the first
+        // anchored fix (when _speedMps is still 0) is not rejected.
+        var assumedSpeed = Math.Max(_speedMps, speedMps);
+        var reachable = assumedSpeed * elapsed.TotalSeconds + floor;
+
+        if (travelled > reachable)
+        {
+            Trace($"recal rejected: travelled={travelled:F1} reachable={reachable:F1}");
+
+            return;
+        }
+
+        var impliedHeading = Geo.BearingDegrees(
+            _estimatedLatitude, _estimatedLongitude,
+            trustedFix.Latitude, trustedFix.Longitude);
+
+        UpdateOffsetAndBias(impliedHeading, trustedFix.Timestamp, dr);
+
+        Trace($"recal elapsed={elapsed.TotalSeconds:F2} travelled={travelled:F1} " +
+              $"floor={floor:F1} speed={_speedMps:F1} bias={_gyroBiasDegPerSec:F2}");
+    }
+
     // caller holds _sync
-    private void UpdateOffsetAndBias(double impliedHeading, DateTimeOffset at)
+    private void UpdateOffsetAndBias(
+        double impliedHeading, DateTimeOffset at, DeadReckoningOptions dr)
     {
         var newOffset = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
 
@@ -213,12 +217,13 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         // feed that residual back into the bias until it stops
         if (_lastOffsetUpdateAt is { } previous &&
             at - previous is var span &&
-            span > TimeSpan.Zero && span <= MaxBiasSpan)
+            span > TimeSpan.Zero && span <= dr.MaxBiasSpan)
         {
-            var residual = -SignedDelta(_headingOffsetDegrees, newOffset) / span.TotalSeconds;
+            var residual = -Geo.SignedDelta(_headingOffsetDegrees, newOffset) / span.TotalSeconds;
 
             _gyroBiasDegPerSec = Math.Clamp(
-                _gyroBiasDegPerSec + BiasGain * residual, -MaxBiasDegPerSec, MaxBiasDegPerSec);
+                _gyroBiasDegPerSec + dr.BiasGain * residual,
+                -dr.MaxBiasDegPerSec, dr.MaxBiasDegPerSec);
         }
 
         _headingOffsetDegrees = newOffset;
@@ -240,7 +245,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             // a parked vehicle's gyro reads bias and noise, nothing else.
             // integrating it only accumulates heading error that no
             // recalibration can remove, because a stationary vehicle never
-            // travels far enough to clear RecalibrateAgainst's floor.
+            // travels far enough to clear the recalibration floor.
             if (_motionState == MotionState.Stationary)
                 return;
 
@@ -257,6 +262,8 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
     private void Extrapolate()
     {
+        var dr = options.CurrentValue.DeadReckoning;
+
         RawPositionSample sample;
 
         lock (_sync)
@@ -287,37 +294,42 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             // never shrinks until the next anchor: stopping mid-outage must not
             // make a drifted position look precise
             _accuracySinceAnchor = Math.Max(
-                _accuracySinceAnchor, DriftAccuracyMeters(sinceAnchor, effectiveSpeed));
+                _accuracySinceAnchor, DriftAccuracyMeters(sinceAnchor, effectiveSpeed, dr));
 
             sample = new RawPositionSample(
                 lat, lon, _accuracySinceAnchor, now, PositionSourceType.DeadReckoned,
                 effectiveSpeed, correctedHeading);
 
-            Trace?.Invoke(this,
-                $"extrap heading={_headingDegrees:F1} offset={_headingOffsetDegrees:F1} " +
-                $"corrected={correctedHeading:F1} speed={effectiveSpeed:F1} " +
-                $"since={sinceAnchor:F1} acc={_accuracySinceAnchor:F0} bias={_gyroBiasDegPerSec:F2}");
+            Trace($"extrap heading={_headingDegrees:F1} offset={_headingOffsetDegrees:F1} " +
+                  $"corrected={correctedHeading:F1} speed={effectiveSpeed:F1} " +
+                  $"since={sinceAnchor:F1} acc={_accuracySinceAnchor:F0} bias={_gyroBiasDegPerSec:F2}");
         }
 
         _estimateProduced?.Invoke(this, sample);
     }
 
-    private static double SignedDelta(double from, double to) =>
-        ((to - from + 540) % 360) - 180;
+    // The message is only interpolated when something is listening, which the
+    // old static Trace event could not do.
+    private void Trace(string message)
+    {
+        if (diagnostics.IsEnabled)
+            diagnostics.Trace(TraceCategory, message);
+    }
 
     // The mean cross-track offset of a track rotating at HeadingDriftDegPerSec
     // is roughly half the final heading error times the distance covered.
-    private static double DriftAccuracyMeters(double seconds, double speedMps)
+    private static double DriftAccuracyMeters(
+        double seconds, double speedMps, DeadReckoningOptions dr)
     {
         if (seconds <= 0)
-            return BaseAccuracyMeters;
+            return dr.BaseAccuracyMeters;
 
-        var headingErrorRad = Geo.ToRad(HeadingDriftDegPerSec * seconds);
+        var headingErrorRad = Geo.ToRad(dr.HeadingDriftDegPerSec * seconds);
         var crossTrack = speedMps * seconds * headingErrorRad / 2;
-        var alongTrack = SpeedErrorFraction * speedMps * seconds;
+        var alongTrack = dr.SpeedErrorFraction * speedMps * seconds;
 
         return Math.Sqrt(
-            BaseAccuracyMeters * BaseAccuracyMeters +
+            dr.BaseAccuracyMeters * dr.BaseAccuracyMeters +
             crossTrack * crossTrack +
             alongTrack * alongTrack);
     }

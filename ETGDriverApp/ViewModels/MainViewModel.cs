@@ -79,8 +79,6 @@ internal partial class MainViewModel : PageViewModel
         stateMachine.StateChanged += (_, state) => Append($"State -> {state}");
 
         CameraCenter = new MauiLocation(Origin.Lat, Origin.Lon);
-
-        HeadingIntegrationDeadReckoningEstimator.Trace += (_, message) => Append(message);
     }
 
     public string? OnSiteJobId => _onSiteAvailable.FirstOrDefault();

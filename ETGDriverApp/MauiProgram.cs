@@ -1,4 +1,4 @@
-﻿using ETGDriverApp.Core;
+using ETGDriverApp.Core;
 using ETGDriverApp.Core.Services;
 using ETGDriverApp.Core.Services.Jobs;
 using ETGDriverApp.Pages;
@@ -31,8 +31,10 @@ public static class MauiProgram
 #endif
 
         builder.UseMauiMaps();
-        
-        
+
+        builder.Configuration
+            .AddPackagedJsonFile("appsettings.json", optional: false);
+
         //builder.Services.AddSingleton(Accelerometer.Default);
         //builder.Services.AddSingleton(Gyroscope.Default);
         // simulated
@@ -44,8 +46,10 @@ public static class MauiProgram
         builder.Services.AddSingleton<ILocationListener>(sp => sp.GetRequiredService<SimulatedLocationListener>());
         builder.Services.AddSingleton<NoOpJobStatusWriter>();
         builder.Services.AddSingleton<IJobStatusWriter>(sp => sp.GetRequiredService<NoOpJobStatusWriter>());
-        builder.Services.AddDriverPositioning();
-        
+
+        // binds the "Positioning" section and validates it on startup
+        builder.Services.AddDriverPositioning(builder.Configuration);
+
 #if ANDROID
         //builder.Services.AddSingleton<ILocationListener, AndroidLocationListener>();
 #elif IOS

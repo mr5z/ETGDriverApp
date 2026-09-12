@@ -1,4 +1,6 @@
+using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Models;
+using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -10,16 +12,12 @@ internal interface IStalenessWatchdog
 }
 
 internal class StalenessWatchdog(
+    IOptionsMonitor<PositioningOptions> options,
     IPositionFilterPipeline pipeline,
     IPositionStateMachine stateMachine,
     PositionFeed feed,
     TimeProvider clock) : IStalenessWatchdog, IAsyncDisposable
 {
-    private static readonly TimeSpan SoftThreshold = TimeSpan.FromSeconds(12);
-    private static readonly TimeSpan HardThreshold = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan MinTimeBetweenForcedFixes = TimeSpan.FromSeconds(15);
-
     private readonly CancellationTokenSource _cts = new();
     private readonly Lock _sync = new();
 
@@ -80,7 +78,10 @@ internal class StalenessWatchdog(
 
     private async Task RunAsync(CancellationToken ct)
     {
-        using var timer = new PeriodicTimer(TickInterval);
+        // read once: a change to the tick rate takes effect on the next
+        // session. The thresholds it compares against are still read per
+        // tick, which is where a live change actually matters.
+        using var timer = new PeriodicTimer(options.CurrentValue.Staleness.TickInterval);
 
         while (await timer.WaitForNextTickAsync(ct))
         {
@@ -98,9 +99,10 @@ internal class StalenessWatchdog(
             }
         }
     }
-    
+
     private async Task TickAsync(CancellationToken ct)
     {
+        var staleness = options.CurrentValue.Staleness;
         var now = clock.GetUtcNow();
 
         TimeSpan sinceFix;
@@ -109,15 +111,15 @@ internal class StalenessWatchdog(
         lock (_sync)
         {
             sinceFix = now - _lastRealFixAt;
-            forcedFixDue = now - _lastForcedFixAt >= MinTimeBetweenForcedFixes;
+            forcedFixDue = now - _lastForcedFixAt >= staleness.MinTimeBetweenForcedFixes;
         }
 
         // repeated calls are intended: the filter's uncertainty grows between
         // them, so the give-up threshold is reached on a later tick
-        if (sinceFix >= HardThreshold)
+        if (sinceFix >= staleness.HardThreshold)
             stateMachine.NotifyFixStale(pipeline.PredictUncertaintyMeters(now));
 
-        if (sinceFix >= SoftThreshold && forcedFixDue)
+        if (sinceFix >= staleness.SoftThreshold && forcedFixDue)
         {
             lock (_sync)
                 _lastForcedFixAt = now;
