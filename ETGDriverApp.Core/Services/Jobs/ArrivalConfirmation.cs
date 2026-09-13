@@ -51,13 +51,15 @@ public static class ArrivalStanding
         if (observation.Confidence == GeofenceEventConfidence.Suppressed)
             return ConfirmationStanding.Unchanged;
 
-        if (observation.Inside)
-            return ConfirmationStanding.Strengthened;
+        // Outside, but not by more than we could be wrong by, is not evidence
+        // of anything: saying nothing is correct there. This is the case the
+        // evaluator's drift gate exists for, and WithinNoiseOf is the same
+        // test it uses, so the two cannot drift apart.
+        if (observation.Offset.WithinNoiseOf(observation.EffectiveRadiusMeters))
+            return ConfirmationStanding.Unchanged;
 
-        // outside, but not by more than we could be wrong by. Saying nothing
-        // is correct here: this is the case the old drift gate existed for.
-        return observation.DistanceToBoundaryMeters > observation.EffectiveRadiusMeters
-            ? ConfirmationStanding.Contradicted
-            : ConfirmationStanding.Unchanged;
+        return observation.Offset.Inside
+            ? ConfirmationStanding.Strengthened
+            : ConfirmationStanding.Contradicted;
     }
 }

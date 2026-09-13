@@ -9,6 +9,7 @@ public enum PositionSourceType
 
 public enum PositionState
 {
+    NoFix,
     Tracking,
     Degraded,
     DeadReckoning,

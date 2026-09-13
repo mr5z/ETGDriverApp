@@ -4,42 +4,39 @@ using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
+public interface IGeofenceEvaluator
+{
+    // Emitted for every tracked region on every position, before any
+    // transition for that same position. A consumer holding a belief of its
+    // own can therefore drop it and still see the transition that follows.
+    event EventHandler<RegionObservation> Observed;
+
+    void OnPositionUpdated(NormalizedPosition position);
+}
+
 public interface IGeofenceRegistry
 {
-    // replaces any region with the same Id
+    IReadOnlyList<string> ActiveRegionIds { get; }
+
     void Add(IGeofenceRegion region);
 
     bool Remove(string regionId);
 
     int RemoveWhere(Func<IGeofenceRegion, bool> predicate);
-
-    IReadOnlyList<string> ActiveRegionIds { get; }
-}
-
-public interface IGeofenceEvaluator
-{
-    void OnPositionUpdated(NormalizedPosition position);
-
-    // Raised for every tracked region on every position, transition or not.
-    // Always raised before any transition for the same position, so a
-    // consumer can drop a belief that has just been contradicted before it
-    // is asked to interpret a crossing that followed from that same belief.
-    event EventHandler<RegionObservation> Observed;
 }
 
 internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
     : IGeofenceEvaluator, IGeofenceRegistry
 {
-    private readonly Dictionary<string, TrackedRegion> _tracked = [];
     private readonly Lock _sync = new();
+    private readonly Dictionary<string, TrackedRegion> _tracked = [];
 
-    private sealed class TrackedRegion(IGeofenceRegion region)
+    private class TrackedRegion(IGeofenceRegion region)
     {
         public IGeofenceRegion Region { get; } = region;
 
-        // null until the first position after arming establishes the
-        // baseline, so arming a fence the driver is already inside fires
-        // nothing
+        // null until the first position establishes a baseline: arming
+        // inside a region is not an entry
         public bool? Inside { get; set; }
 
         public DateTimeOffset? InsideSince { get; set; }
@@ -129,8 +126,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
     private static RegionObservation Observe(IGeofenceRegion region, NormalizedPosition position) =>
         new(
             region.Id,
-            region.Contains(position.Latitude, position.Longitude),
-            region.DistanceToBoundaryMeters(position.Latitude, position.Longitude),
+            region.OffsetFrom(position.Latitude, position.Longitude),
             position.EffectiveRadiusMeters,
             ConfidenceFor(position),
             position.Timestamp);
@@ -145,19 +141,20 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
 
         if (tracked.Inside is not { } wasInside)
         {
-            var initiallyInside = region.Contains(position.Latitude, position.Longitude);
+            var initial = region.OffsetFrom(position.Latitude, position.Longitude);
 
-            tracked.Inside = initiallyInside;
-            tracked.InsideSince = initiallyInside ? position.Timestamp : null;
+            tracked.Inside = initial.Inside;
+            tracked.InsideSince = initial.Inside ? position.Timestamp : null;
 
             return;
         }
 
         // once inside, leaving is judged against the exit boundary
-        var inside = wasInside
-            ? region.ContainsForExit(position.Latitude, position.Longitude)
-            : region.Contains(position.Latitude, position.Longitude);
+        var offset = wasInside
+            ? region.ExitOffsetFrom(position.Latitude, position.Longitude)
+            : region.OffsetFrom(position.Latitude, position.Longitude);
 
+        var inside = offset.Inside;
         var confidence = ConfidenceFor(position);
 
         if (inside == wasInside)
@@ -170,11 +167,6 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
             return;
         }
 
-        // a crossing inside our own error radius is indistinguishable from drift
-        var distanceToBoundary = wasInside
-            ? region.DistanceToExitBoundaryMeters(position.Latitude, position.Longitude)
-            : region.DistanceToBoundaryMeters(position.Latitude, position.Longitude);
-
         // The drift gate exists to stop an automatic event firing on noise.
         // A suppressed enter triggers nothing automatic - it only tells the
         // consumer an arrival is worth offering to a human - so it is judged
@@ -184,7 +176,8 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // would never be seen at all.
         var offeringUnverifiedEnter = inside && confidence == GeofenceEventConfidence.Suppressed;
 
-        if (!offeringUnverifiedEnter && distanceToBoundary < position.EffectiveRadiusMeters)
+        // a crossing inside our own error radius is indistinguishable from drift
+        if (!offeringUnverifiedEnter && offset.WithinNoiseOf(position.EffectiveRadiusMeters))
             return;
 
         // dwell is measured against fix timestamps, not wall clock
@@ -192,24 +185,27 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         {
             if (tracked.InsideSince is not { } since)
             {
-                // Also the reason no enter ever fires on a single fix when a dwell is
-                // configured: the first inside fix only starts the clock. That costs the
-                // well-inside shortcut below one fix of latency, and buys protection
-                // against a lone multipath fix -- Trusted only means the state is
-                // Tracking, and a confident fix in an urban canyon can still be tens of
-                // metres out. Do not hoist the shortcut above this.
+                // Also the reason no enter ever fires on a single fix when a
+                // dwell is configured: the first inside fix only starts the
+                // clock. That costs the well-inside shortcut below one fix of
+                // latency, and buys protection against a lone multipath fix -
+                // Trusted only means the state is Tracking, and a confident
+                // fix in an urban canyon can still be tens of metres out. Do
+                // not hoist the shortcut above this.
                 tracked.InsideSince = position.Timestamp;
 
                 return;
             }
 
-            // the dwell exists to rule out a drive-by. A trusted fix well inside the
-            // region already rules it out: a vehicle passing through is never this
-            // far in with this little uncertainty.
+            // The dwell exists to rule out a drive-by. A trusted fix well
+            // inside the region already rules it out: a vehicle passing
+            // through is never this far in with this little uncertainty.
+            // ClearOf cannot be satisfied from outside the region, so this
+            // no longer depends on `inside` having been checked separately.
             var wellInside =
                 confidence == GeofenceEventConfidence.Trusted &&
-                region.DistanceToBoundaryMeters(position.Latitude, position.Longitude)
-                > position.EffectiveRadiusMeters * geofence.WellInsideRadiusMultiplier;
+                region.OffsetFrom(position.Latitude, position.Longitude)
+                    .ClearOf(position.EffectiveRadiusMeters * geofence.WellInsideRadiusMultiplier);
 
             if (!wellInside && position.Timestamp - since < region.EnterDwell)
                 return;
@@ -262,8 +258,11 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
     private static GeofenceEventConfidence ConfidenceFor(NormalizedPosition position) =>
         position.State switch
         {
-            PositionState.DeadReckoning => GeofenceEventConfidence.Suppressed,
-            PositionState.Degraded or PositionState.Reacquiring => GeofenceEventConfidence.LowConfidence,
+            // no position at all cannot be evidence of anything
+            PositionState.NoFix or PositionState.DeadReckoning =>
+                GeofenceEventConfidence.Suppressed,
+            PositionState.Degraded or PositionState.Reacquiring =>
+                GeofenceEventConfidence.LowConfidence,
             _ => GeofenceEventConfidence.Trusted
         };
 }

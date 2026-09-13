@@ -12,10 +12,8 @@ internal interface ISessionRecovery
 
 internal record SessionRecoveryResult(
     IReadOnlyList<NormalizedPosition> RecoveredTrack,
-    TimeSpan? GapDuration)
-{
-    public bool IsRestart => GapDuration is not null;
-}
+    TimeSpan? GapDuration,
+    bool IsRestart = false);
 
 internal class SessionRecovery(
     IPositionStore store,
@@ -36,6 +34,7 @@ internal class SessionRecovery(
         var now = clock.GetUtcNow();
         var gap = now - latest.Timestamp;
         var track = await store.GetSinceAsync(now - recovery.RecoveryWindow, ct);
+        var isRestart = gap > recovery.MaxUsefulContinuity;
 
         // the pipeline is deliberately not seeded with the last persisted
         // position: it would be an unbounded extrapolation from a cold start
@@ -52,6 +51,6 @@ internal class SessionRecovery(
             pipeline.SeedFrom(latest, gap);
         }
 
-        return new SessionRecoveryResult(track, gap);
+        return new SessionRecoveryResult(track, gap, isRestart);
     }
 }

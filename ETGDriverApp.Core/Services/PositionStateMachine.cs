@@ -39,7 +39,7 @@ internal class PositionStateMachine(
     private DateTimeOffset? _reacquiringSince;
     private DateTimeOffset? _lastRealFixAt;
     private bool _unavailableRaisedForCurrentEpisode;
-    private PositionState _currentState = PositionState.Tracking;
+    private PositionState _currentState = PositionState.NoFix;
 
     PositionState IPositionStateMachine.CurrentState => _currentState;
 
@@ -148,8 +148,6 @@ internal class PositionStateMachine(
         // authoritative one. Both sides now read the same configured value
         // instead of keeping hand-synchronised private copies.
         var staleAfter = snapshot.Staleness.HardThreshold;
-        var maxUncertainty = snapshot.State.MaxUsefulUncertaintyMeters;
-        var maxBlind = snapshot.State.MaxBlindDuration;
 
         PositionState? transitioned;
         var raiseUnavailable = false;
@@ -162,30 +160,16 @@ internal class PositionStateMachine(
             if (!fixLost && _lastRealFixAt is { } recent && now - recent < staleAfter)
                 return;
 
+            var verdict = Judge(
+                _lastRealFixAt, now, _currentState,
+                uncertaintyRadiusMeters, fixLost, snapshot.State);
+
             _reacquiringSince = null;
 
-            // on the tick that first enters DeadReckoning, the uncertainty
-            // passed in is the filter's unaided prediction: its covariance
-            // grows with the fourth power of the gap, so it clears the
-            // threshold within seconds. DR has not fed the filter yet at
-            // this point, so give it one watchdog interval to aid it.
-            var wasAlreadyDeadReckoning = _currentState == PositionState.DeadReckoning;
+            transitioned = SetState(verdict.State);
 
-            transitioned = SetState(PositionState.DeadReckoning);
-
-            var blindFor = _lastRealFixAt is { } last
-                ? now - last
-                : TimeSpan.Zero;
-
-            // A lost fix skips the grace period outright: there is no filter
-            // state to grow, so waiting another tick proves nothing.
-            var unusable = fixLost ||
-                (wasAlreadyDeadReckoning &&
-                 (uncertaintyRadiusMeters >= maxUncertainty || blindFor >= maxBlind));
-
-            // a stationary vehicle keeps its uncertainty low and stays
-            // usable; one at speed passes the threshold quickly
-            if (unusable && !_unavailableRaisedForCurrentEpisode)
+            // one unavailable per episode, reset when a fix is next accepted
+            if (verdict.Unusable && !_unavailableRaisedForCurrentEpisode)
             {
                 _unavailableRaisedForCurrentEpisode = true;
                 raiseUnavailable = true;
@@ -231,5 +215,32 @@ internal class PositionStateMachine(
             return;
 
         _lastRealFixAt = observedAt;
+    }
+    
+    private readonly record struct StaleVerdict(PositionState State, bool Unusable);
+
+    private static StaleVerdict Judge(
+        DateTimeOffset? lastRealFixAt,
+        DateTimeOffset now,
+        PositionState current,
+        double uncertaintyRadiusMeters,
+        bool fixLost,
+        PositionStateOptions state)
+    {
+        // no anchor means nothing to extrapolate from, and nothing whose
+        // uncertainty could grow - so the usual give-up tests can never fire
+        if (lastRealFixAt is not { } last)
+            return new StaleVerdict(PositionState.NoFix, Unusable: true);
+
+        // the first tick into DeadReckoning sees the filter's unaided
+        // prediction; DR has not aided it yet, so allow one interval
+        var settled = current == PositionState.DeadReckoning;
+
+        var unusable = fixLost ||
+                       (settled &&
+                        (uncertaintyRadiusMeters >= state.MaxUsefulUncertaintyMeters ||
+                         now - last >= state.MaxBlindDuration));
+
+        return new StaleVerdict(PositionState.DeadReckoning, unusable);
     }
 }
