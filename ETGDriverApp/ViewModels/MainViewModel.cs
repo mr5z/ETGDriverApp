@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ETGDriverApp.Core.Diagnostics;
+using ETGDriverApp.Core.Helpers;
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services;
 using ETGDriverApp.Core.Services.Jobs;
@@ -36,7 +37,7 @@ public class MapCircleViewModel
 
 internal partial class MainViewModel : PageViewModel
 {
-    private static readonly (double Lat, double Lon) Origin = (14.3370, 121.0800);
+    private static readonly (double Lat, double Lon) Origin = (15.6175722,120.9382684);
 
     private readonly IPositioningSession _session;
     private readonly IPositionFilterPipeline _pipeline;
@@ -116,8 +117,8 @@ internal partial class MainViewModel : PageViewModel
 
         // far enough that a five-minute blackout at 12 m/s (3.6 km) plus the
         // settling and reacquisition legs all fit inside one trip
-        const double minDistanceMeters = 3000;
-        const double maxDistanceMeters = 5000;
+        const double minDistanceMeters = 2000;
+        const double maxDistanceMeters = 4000;
 
         var bearing = _random.NextDouble() * 360;
         var distance = minDistanceMeters +
@@ -311,7 +312,7 @@ internal partial class MainViewModel : PageViewModel
             MapCircles.Add(_accuracyCircle);
 
             CameraCenter = location;
-            CameraRadiusMeters = 1500;
+            CameraRadiusMeters = 600;
             StatusText = $"{position.State} · ±{position.EffectiveRadiusMeters:F0}m · " +
                          $"{position.Latitude:F5},{position.Longitude:F5}";
 

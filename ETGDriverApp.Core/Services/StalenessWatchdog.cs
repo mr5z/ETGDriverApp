@@ -76,8 +76,25 @@ internal class StalenessWatchdog(
         if (position.SourceType == PositionSourceType.DeadReckoned)
             return;
 
+        var now = clock.GetUtcNow();
+
+        // When the world was last actually observed, which is the fix's own
+        // timestamp rather than the moment we processed it: a background wake
+        // delivers a batch of minutes-old fixes at once, and treating those as
+        // fresh would silence the watchdog exactly when it should be firing.
+        // PositionStateMachine.RecordObservation does the same, and the two must
+        // agree about how stale the track is.
+        var observedAt = position.Timestamp > now ? now : position.Timestamp;
+
         lock (_sync)
-            _lastRealFixAt = clock.GetUtcNow();
+        {
+            // within a stale batch, fixes can arrive out of order; an older one
+            // must not drag the clock back behind a newer one already recorded
+            if (_lastRealFixAt > observedAt)
+                return;
+
+            _lastRealFixAt = observedAt;
+        }
     }
 
     private async Task RunAsync(CancellationToken ct)

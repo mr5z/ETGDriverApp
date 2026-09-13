@@ -1,4 +1,4 @@
-namespace ETGDriverApp.Core.Models;
+namespace ETGDriverApp.Core.Helpers;
 
 public static class Geo
 {

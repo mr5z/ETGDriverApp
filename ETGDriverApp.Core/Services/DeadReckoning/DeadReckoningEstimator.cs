@@ -1,5 +1,6 @@
 using ETGDriverApp.Core.Configuration;
 using ETGDriverApp.Core.Diagnostics;
+using ETGDriverApp.Core.Helpers;
 using ETGDriverApp.Core.Models;
 using Microsoft.Extensions.Options;
 

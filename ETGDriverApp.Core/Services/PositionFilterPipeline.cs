@@ -56,10 +56,6 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
     private DateTimeOffset _lastAcceptedTimestamp = DateTimeOffset.MinValue;
     private double _lastKnownUncertaintyMeters;
 
-    private EventHandler<PositionEvaluatedEventArgs>? _positionEvaluated;
-    private EventHandler<NormalizedPosition>? _positionUpdated;
-    private EventHandler? _locationUnavailable;
-
     public PositionFilterPipeline(
         IAccuracyGate accuracyGate,
         IPlausibilityGate plausibilityGate,
@@ -79,18 +75,22 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         _stateMachine.LocationBecameUnavailable += OnLocationBecameUnavailable;
     }
 
+
+    private EventHandler<PositionEvaluatedEventArgs>? _positionEvaluated;
     event EventHandler<PositionEvaluatedEventArgs> IPositionFilterPipeline.PositionEvaluated
     {
         add => _positionEvaluated += value;
         remove => _positionEvaluated -= value;
     }
 
+    private EventHandler<NormalizedPosition>? _positionUpdated;
     event EventHandler<NormalizedPosition> IPositionFilterPipeline.PositionUpdated
     {
         add => _positionUpdated += value;
         remove => _positionUpdated -= value;
     }
 
+    private EventHandler? _locationUnavailable;
     event EventHandler IPositionFilterPipeline.LocationUnavailable
     {
         add => _locationUnavailable += value;

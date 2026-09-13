@@ -1,5 +1,5 @@
 using ETGDriverApp.Core.Configuration;
-using ETGDriverApp.Core.Models;
+using ETGDriverApp.Core.Helpers;
 using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services.Filters;
