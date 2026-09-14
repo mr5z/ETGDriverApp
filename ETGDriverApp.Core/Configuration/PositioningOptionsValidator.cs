@@ -11,13 +11,10 @@ namespace ETGDriverApp.Core.Configuration;
 // below are the safety envelope; they are NOT tuning knobs and are not
 // configurable by design.
 //
-// Note on what is deliberately NOT checked here: there is no rule deriving a
-// threshold from the filter's covariance growth. Such a rule would have to
-// assume a growth model, and the filter has two very different regimes -
-// free growth before dead reckoning engages, and growth pinned near DR's
-// claimed accuracy once it does. A rule true in one regime is misleading in
-// the other, and a validator that is wrong half the time is worse than no
-// validator. The relationships below hold in both.
+// Note on what is deliberately NOT checked here: nothing relates a threshold
+// to a site's fence radius, because sites arrive at runtime and this runs at
+// bind time. Geofence.MaxUnverifiedRadiusMultiplier makes that comparison per
+// site, at the moment it matters, which is the only place it can be made.
 public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOptions>
 {
     public ValidateOptionsResult Validate(string? name, PositioningOptions o)
@@ -101,6 +98,8 @@ public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOp
             failures.Add("Recovery.RecoveryWindowHours must not exceed Store.RetentionHours.");
 
         Range(failures, "Geofence.WellInsideRadiusMultiplier", o.Geofence.WellInsideRadiusMultiplier, 1, 50);
+        Range(failures, "Geofence.MaxUnverifiedRadiusMultiplier", o.Geofence.MaxUnverifiedRadiusMultiplier, 0, 50);
+        Range(failures, "Geofence.DefaultEnterDwellSeconds", o.Geofence.DefaultEnterDwellSeconds, 0, 600);
 
         return failures.Count == 0
             ? ValidateOptionsResult.Success

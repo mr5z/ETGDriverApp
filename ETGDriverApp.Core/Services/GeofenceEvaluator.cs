@@ -174,7 +174,17 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // unsatisfiable during DR: the accumulated accuracy radius is
         // routinely wider than a site fence, so a crossing in a dead zone
         // would never be seen at all.
-        var offeringUnverifiedEnter = inside && confidence == GeofenceEventConfidence.Suppressed;
+        //
+        // But "judged on containment alone" is not "judged on nothing". Once
+        // our claimed error runs to several times the fence, being inside it
+        // says nothing worth asking a human about, and the offer is withheld.
+        // That bound is the only place DR error and fence radius are ever
+        // compared.
+        var offeringUnverifiedEnter =
+            inside &&
+            confidence == GeofenceEventConfidence.Suppressed &&
+            position.EffectiveRadiusMeters <=
+                region.RadiusMeters * geofence.MaxUnverifiedRadiusMultiplier;
 
         // a crossing inside our own error radius is indistinguishable from drift
         if (!offeringUnverifiedEnter && offset.WithinNoiseOf(position.EffectiveRadiusMeters))
@@ -255,6 +265,9 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
             tracked.Inside = inside;
     }
 
+    // Every arm is explicit. This used to end in `_ => Trusted`, which made
+    // the highest grade of evidence the fall-through - so any state added
+    // later would be Trusted until someone remembered this switch.
     private static GeofenceEventConfidence ConfidenceFor(NormalizedPosition position) =>
         position.State switch
         {
@@ -263,6 +276,8 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
                 GeofenceEventConfidence.Suppressed,
             PositionState.Degraded or PositionState.Reacquiring =>
                 GeofenceEventConfidence.LowConfidence,
-            _ => GeofenceEventConfidence.Trusted
+            PositionState.Tracking =>
+                GeofenceEventConfidence.Trusted,
+            _ => GeofenceEventConfidence.Suppressed
         };
 }

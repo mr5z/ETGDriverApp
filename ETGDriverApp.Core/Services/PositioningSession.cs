@@ -1,5 +1,6 @@
 using ETGDriverApp.Core.Models;
 using ETGDriverApp.Core.Services.DeadReckoning;
+using ETGDriverApp.Core.Services.Sites;
 
 namespace ETGDriverApp.Core.Services;
 
@@ -41,7 +42,8 @@ internal class PositioningSession(
     DeadReckoningFeed deadReckoningFeed,
     IStalenessWatchdog watchdog,
     IPositionFilterPipeline pipeline,
-    IGeofenceEvaluator geofenceEvaluator) : IPositioningSession
+    IGeofenceEvaluator geofenceEvaluator,
+    ISiteArrivalMonitor siteMonitor) : IPositioningSession
 {
     private readonly Lock _sync = new();
 
@@ -130,9 +132,9 @@ internal class PositioningSession(
         {
             if (_subscribed)
             {
-                // otherwise a stopped session keeps evaluating the last job's
-                // fences - a driver parked at home inside an old pickup
-                // radius could still trigger job transitions
+                // otherwise a stopped session keeps evaluating the last
+                // shift's fences - a driver parked at home inside an old
+                // pickup radius could still trigger transitions
                 pipeline.PositionUpdated -= OnPositionUpdated;
                 _subscribed = false;
             }
@@ -143,6 +145,12 @@ internal class PositioningSession(
                 _endSubscribed = false;
             }
         }
+
+        // Belt and braces with the unsubscribe above, and deliberately so.
+        // Which sites are worth watching is the caller's business, but the
+        // guarantee that a finished shift watches none of them is not
+        // something to leave to a host remembering to call Unwatch.
+        siteMonitor.UnwatchAll();
     }
 
     private void OnPositionUpdated(object? sender, NormalizedPosition position) =>

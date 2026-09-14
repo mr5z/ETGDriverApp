@@ -20,6 +20,10 @@ namespace ETGDriverApp.Core.Configuration;
 //    internally inconsistent tick.
 //  * Revision is echoed into diagnostics so a misbehaving unit can be traced
 //    back to the exact config payload it was running.
+//  * The compiled defaults ARE the configuration for any host that does not
+//    ship an appsettings.json. Keep them equal to the values under test;
+//    a JSON file that silently doubles a threshold is the same bug as a bad
+//    remote push, arriving by a different route.
 public sealed class PositioningOptions
 {
     public const string SectionName = "Positioning";
@@ -75,11 +79,15 @@ public sealed class KalmanFilterOptions
     // velocity between updates.
     //
     // Sizes covariance growth between updates as roughly
-    // 0.5 * AccelNoiseMps2 * t^2. Note that this free growth only applies
-    // BEFORE dead reckoning engages - once DR is ingesting, each estimate
-    // updates the filter and pins uncertainty near DR's own claimed
-    // accuracy. The two regimes behave very differently and a log showing
-    // one says nothing about the other.
+    // 0.5 * AccelNoiseMps2 * t^2.
+    //
+    // NOTE: an earlier version of this comment claimed the free growth stops
+    // once dead reckoning engages, because each DR estimate updates the
+    // filter and pins uncertainty near DR's claimed accuracy. That is wrong.
+    // UpdatePosition uses r = accuracy^2, so a DR sample claiming 400 m
+    // arrives with r = 160,000 against a P of a few thousand - the gain is
+    // near zero and the update barely moves the covariance. There is one
+    // regime, not two, and it grows throughout an outage.
     //
     // 1.5 was high for a road vehicle: the filter reached several hundred
     // metres of uncertainty within half a minute of a quiet stretch. 0.7 is
@@ -115,11 +123,10 @@ public sealed class DeadReckoningOptions
     //
     // Known to be pessimistic: against the simulated vehicle DR's true error
     // ran about a third of what DriftAccuracyMeters claimed. That is the safe
-    // direction to be wrong in, but it is also why
-    // State.MaxUsefulUncertaintyMeters almost never fires - DR's self-reported
-    // error outruns reality and MaxBlindSeconds gets there first. Tune this
-    // down to match measurement and that threshold comes alive, so the two
-    // want re-checking together rather than separately.
+    // direction to be wrong in, and it is also what decides how long a
+    // suppressed enter stays offerable - see
+    // Geofence.MaxUnverifiedRadiusMultiplier, which compares this radius
+    // against the fence. Tune the two together, not separately.
     public double HeadingDriftDegPerSec { get; set; } = 0.5;
 
     // assumed fractional error on the held speed
@@ -152,10 +159,12 @@ public sealed class DeadReckoningOptions
 
 public sealed class PositionStateOptions
 {
-    // Beyond this the position is too vague to act on: wider than any pickup
-    // fence, so a geofence decision could not be defended.
+    // Beyond this the position is too vague to act on.
     //
-    // In practice this rarely fires today - see HeadingDriftDegPerSec.
+    // This is NOT checked against any site's fence radius - it cannot be,
+    // since sites arrive at runtime. Geofence.MaxUnverifiedRadiusMultiplier
+    // is where that comparison actually happens, per site, at the moment it
+    // matters.
     public double MaxUsefulUncertaintyMeters { get; set; } = 150;
 
     // a fix lands but the state stays Reacquiring for this long
@@ -164,9 +173,10 @@ public sealed class PositionStateOptions
     // However confident the filter is, a position no real fix has touched in
     // this long cannot be defended.
     //
-    // Also the time base for AdmissionGate's reachability frame: this times
+    // Also the CEILING on AdmissionGate's reachability frame: this times
     // Plausibility.MaxPlausibleSpeedKph bounds how far a single unconfirmed
-    // fix may relocate the track.
+    // fix may relocate the track. The gate scales down to the time actually
+    // blind, so this only binds during a full-length outage.
     public double MaxBlindSeconds { get; set; } = 90;
 
     public TimeSpan ReacquisitionSettleDuration =>
@@ -178,15 +188,12 @@ public sealed class PositionStateOptions
 public sealed class StalenessOptions
 {
     // no fix for this long: ask the platform for one
-    public double SoftThresholdSeconds { get; set; } = 6;
+    public double SoftThresholdSeconds { get; set; } = 12;
 
     // no fix for this long: tell the state machine we are blind.
     // PositionStateMachine reads this same value - it used to keep a private
     // copy that a comment asked you to keep in sync by hand.
-    //
-    // Also bounds how long AdmissionGate will hold an unconfirmed relocation
-    // candidate waiting for a second fix to agree with it.
-    public double HardThresholdSeconds { get; set; } = 10;
+    public double HardThresholdSeconds { get; set; } = 20;
 
     public double TickIntervalSeconds { get; set; } = 2;
 
@@ -233,4 +240,21 @@ public sealed class GeofenceOptions
     // dwell immediately: a vehicle driving past is never this far in with
     // this little uncertainty.
     public double WellInsideRadiusMultiplier { get; set; } = 2;
+
+    // An unverified (dead-reckoned) enter is only worth offering while our
+    // claimed error is still commensurate with the fence. Beyond this
+    // multiple of the site's radius, "inside" carries no information and the
+    // offer is withheld.
+    //
+    // This is the one place DR error and fence radius meet in a comparison.
+    // Nothing else in the system relates them, because nothing else can:
+    // sites arrive at runtime and no validator sees them.
+    public double MaxUnverifiedRadiusMultiplier { get; set; } = 2;
+
+    // Dwell for a site that does not specify its own. Was a private const in
+    // the old job monitor - the only arrival-relevant threshold that was not
+    // tunable, in a config system built for tuning.
+    public double DefaultEnterDwellSeconds { get; set; } = 30;
+
+    public TimeSpan DefaultEnterDwell => TimeSpan.FromSeconds(DefaultEnterDwellSeconds);
 }

@@ -37,8 +37,12 @@ public readonly record struct BoundaryOffset(double Meters, bool Inside)
 // transition logic is applied. Emitted on every position for every tracked
 // region, so a consumer holding a belief of its own can test that belief
 // against fresh evidence without re-implementing the geometry.
+//
+// SiteKey was RegionId. Same value - the registry key - but the old name
+// described where it came from rather than what a consumer does with it,
+// and consumers key their own state on it.
 public record RegionObservation(
-    string RegionId,
+    string SiteKey,
     BoundaryOffset Offset,
     double EffectiveRadiusMeters,
     GeofenceEventConfidence Confidence,
@@ -50,6 +54,13 @@ public record RegionObservation(
 public interface IGeofenceRegion
 {
     string Id { get; }
+
+    // The enter boundary, exposed so a consumer can relate its own
+    // uncertainty to the size of the thing it is deciding about. Nothing
+    // inside this file uses it; it exists because "is my error radius
+    // commensurate with this fence" is a question several callers need to
+    // ask and none of them can ask without it.
+    double RadiusMeters { get; }
 
     // carries containment, so there is no separate Contains()
     BoundaryOffset OffsetFrom(double latitude, double longitude);
@@ -78,6 +89,8 @@ internal class CircularGeofenceRegion(
     private readonly double _exitRadius = Math.Max(exitRadiusMeters ?? radiusMeters, radiusMeters);
 
     string IGeofenceRegion.Id => id;
+
+    double IGeofenceRegion.RadiusMeters => radiusMeters;
 
     TimeSpan IGeofenceRegion.EnterDwell => enterDwell ?? TimeSpan.Zero;
 

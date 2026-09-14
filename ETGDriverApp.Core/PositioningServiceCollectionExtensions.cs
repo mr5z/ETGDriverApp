@@ -5,7 +5,7 @@ using ETGDriverApp.Core.Services;
 using ETGDriverApp.Core.Services.DeadReckoning;
 using ETGDriverApp.Core.Services.DeadReckoning.Sensors;
 using ETGDriverApp.Core.Services.Filters;
-using ETGDriverApp.Core.Services.Jobs;
+using ETGDriverApp.Core.Services.Sites;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -64,7 +64,11 @@ public static class PositioningServiceCollectionExtensions
         services.AddSingleton<IGeofenceEvaluator>(sp => sp.GetRequiredService<GeofenceEvaluator>());
         services.AddSingleton<IGeofenceRegistry>(sp => sp.GetRequiredService<GeofenceEvaluator>());
 
-        services.AddSingleton<IJobSiteMonitor, JobSiteMonitor>();
+        // Same two-face pattern: the concrete type is registered so the
+        // container owns its lifetime and disposes it, since the monitor
+        // holds a subscription to the evaluator.
+        services.AddSingleton<SiteArrivalMonitor>();
+        services.AddSingleton<ISiteArrivalMonitor>(sp => sp.GetRequiredService<SiteArrivalMonitor>());
 
         return services;
     }
