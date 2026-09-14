@@ -1,13 +1,5 @@
 namespace ETGDriverApp.Core.Diagnostics;
 
-// Replaces HeadingIntegrationDeadReckoningEstimator's `public static event
-// EventHandler<string> Trace`. A static event on a singleton-scoped service
-// kept every subscriber alive for the life of the process, could not be
-// scoped per session or per test, and interpolated its message string on
-// every tick whether or not anything was listening.
-//
-// IsEnabled is checked by callers before building the message, so the
-// formatting cost disappears entirely when nobody is attached.
 public interface IPositioningDiagnostics
 {
     event EventHandler<PositioningTraceEventArgs> Traced;

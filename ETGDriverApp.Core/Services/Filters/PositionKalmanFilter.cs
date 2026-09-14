@@ -119,8 +119,76 @@ internal class PositionKalmanFilter(IOptionsMonitor<PositioningOptions> options)
         UpdateScalar(index: 1, measurement: my, r);
     }
 
+    // Steer the state without touching the covariance.
+    //
+    // An extrapolation is not a measurement. DR's integrated heading follows
+    // turns the constant-velocity prediction cannot, so it is worth adopting
+    // as the position - but it is this filter's own past output plus gyro
+    // integration, so it contains no new information about the world and
+    // must not be allowed to shrink the uncertainty.
+    //
+    // Routing it through UpdatePosition did exactly that. A captured run:
+    // the filter fell from 141m to 29m in four seconds once DR began
+    // ingesting, and while parked it kept tightening to 60m as the true
+    // error passed 1.2km. IngestAsync already names this circularity in the
+    // comment guarding the !extrapolating case; this is the same feedback on
+    // the path that guard does not cover.
+    //
+    // Velocity is deliberately untouched. It is corrected, when the
+    // accelerometer says the vehicle has stopped, through the zero-velocity
+    // update in ApplyVelocityUpdate - which IS evidence, from a sensor this
+    // filter has never fed.
+    public void SetPositionFromExtrapolation(double latitude, double longitude)
+    {
+        if (!_initialized)
+            return;
+
+        (_x, _y) = ToLocal(latitude, longitude);
+    }
+    
+    // Break the position-velocity correlation before a velocity-only update.
+    //
+    // While DR is setting position, that correlation is a fiction - position
+    // comes from DR, velocity from this filter - so a zero-velocity update
+    // would move and shrink position through a link that is not real.
+    //
+    // Done HERE rather than on every extrapolation. Zeroing it per tick also
+    // removed the dt*(p_pv+p_vp) term from PredictCovariance, which is the
+    // dominant one: position variance fell from growing as q*t^3/3 to q*t^2/2.
+    // A captured run ended a 280s outage claiming 267m against a true error
+    // of 355m - the first time the published radius failed to bound reality.
+    public void DecouplePositionFromVelocity()
+    {
+        _p[0, 2] = 0;
+        _p[2, 0] = 0;
+        _p[1, 3] = 0;
+        _p[3, 1] = 0;
+    }
+
+    // A velocity measurement moves POSITION too, through the position-velocity
+    // cross-covariance that PredictCovariance accumulates. That is correct
+    // Kalman behaviour - "if I am stopped now, I must have stopped a while
+    // back, so I overshot" - and over a short unaided stretch it is exactly
+    // what you want.
+    //
+    // Over a long one it is not. _p[0,2] / _p[2,2] has units of seconds and
+    // grows with the prediction, so the position correction is roughly the
+    // correlation time times the velocity innovation. A captured run shows
+    // the cost: a vehicle stopping 275s into an outage produced a 600m
+    // single-tick jump, backwards along the track, doubling the error at the
+    // exact moment it arrived at its destination. Nothing could argue back,
+    // because the simultaneous position update carried r = 4003^2 and a gain
+    // near zero.
+    //
+    // The clamp below is a guard, not physics: the covariance is left as the
+    // update computed it, and only the state shift is bounded. That leaves
+    // the filter's belief and its stated uncertainty slightly inconsistent
+    // for a tick, which is the lesser of the two evils - the alternative is
+    // teleporting the driver.
     public void UpdateVelocity(double speedMps, double courseDegrees, double speedAccuracyMps)
     {
+        var filter = options.CurrentValue.Filter;
+
         var course = Geo.ToRad(courseDegrees);
 
         var vx = speedMps * Math.Sin(course);
@@ -128,8 +196,32 @@ internal class PositionKalmanFilter(IOptionsMonitor<PositioningOptions> options)
 
         var r = Math.Max(speedAccuracyMps * speedAccuracyMps, MinVelocityVarianceM2PerS2);
 
+        var beforeX = _x;
+        var beforeY = _y;
+
         UpdateScalar(index: 2, measurement: vx, r);
         UpdateScalar(index: 3, measurement: vy, r);
+
+        ClampPositionShift(beforeX, beforeY, filter.MaxVelocityUpdateShiftMeters);
+    }
+
+    private void ClampPositionShift(double beforeX, double beforeY, double maxShiftMeters)
+    {
+        if (maxShiftMeters <= 0)
+            return;
+
+        var dx = _x - beforeX;
+        var dy = _y - beforeY;
+
+        var shift = Math.Sqrt(dx * dx + dy * dy);
+
+        if (shift <= maxShiftMeters)
+            return;
+
+        var scale = maxShiftMeters / shift;
+
+        _x = beforeX + dx * scale;
+        _y = beforeY + dy * scale;
     }
 
     private void PredictCovariance(double dt, double accelNoiseMps2)

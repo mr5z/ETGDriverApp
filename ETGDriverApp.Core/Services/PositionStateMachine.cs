@@ -4,13 +4,20 @@ using Microsoft.Extensions.Options;
 
 namespace ETGDriverApp.Core.Services;
 
+public record PositionUnusableEventArgs(UnusableReason Reason, DateTimeOffset At);
+
 public interface IPositionStateMachine
 {
     PositionState CurrentState { get; }
 
+    // False from the moment a give-up threshold is crossed until the next
+    // accepted fix. Read at publish time so it travels with the position
+    // instead of only existing as a notification nobody is obliged to hear.
+    bool IsDefensible { get; }
+
     event EventHandler<PositionState> StateChanged;
 
-    event EventHandler LocationBecameUnavailable;
+    event EventHandler<PositionUnusableEventArgs> LocationBecameUnavailable;
 
     void NotifyFixAccepted(NormalizedPosition fix, AccuracyTier tier);
 
@@ -38,10 +45,19 @@ internal class PositionStateMachine(
 
     private DateTimeOffset? _reacquiringSince;
     private DateTimeOffset? _lastRealFixAt;
-    private bool _unavailableRaisedForCurrentEpisode;
+
+    // the reason already announced for this episode. Latching on the reason
+    // rather than on a bare bool: blind-too-long and uncertainty-too-large
+    // are different facts with different remedies, and whichever crossed
+    // first used to silence the other for the rest of the outage.
+    private UnusableReason _announcedReason = UnusableReason.None;
+
     private PositionState _currentState = PositionState.NoFix;
+    private bool _isDefensible = true;
 
     PositionState IPositionStateMachine.CurrentState => _currentState;
+
+    bool IPositionStateMachine.IsDefensible => _isDefensible;
 
     private EventHandler<PositionState>? _stateChanged;
     event EventHandler<PositionState> IPositionStateMachine.StateChanged
@@ -50,8 +66,8 @@ internal class PositionStateMachine(
         remove => _stateChanged -= value;
     }
 
-    private EventHandler? _locationBecameUnavailable;
-    event EventHandler IPositionStateMachine.LocationBecameUnavailable
+    private EventHandler<PositionUnusableEventArgs>? _locationBecameUnavailable;
+    event EventHandler<PositionUnusableEventArgs> IPositionStateMachine.LocationBecameUnavailable
     {
         add => _locationBecameUnavailable += value;
         remove => _locationBecameUnavailable -= value;
@@ -100,7 +116,8 @@ internal class PositionStateMachine(
                 _reacquiringSince = null;
             }
 
-            _unavailableRaisedForCurrentEpisode = false;
+            _announcedReason = UnusableReason.None;
+            _isDefensible = true;
 
             RecordObservation(fix, now);
 
@@ -150,11 +167,12 @@ internal class PositionStateMachine(
         var staleAfter = snapshot.Staleness.HardThreshold;
 
         PositionState? transitioned;
-        var raiseUnavailable = false;
+        DateTimeOffset now;
+        var announce = UnusableReason.None;
 
         lock (_sync)
         {
-            var now = clock.GetUtcNow();
+            now = clock.GetUtcNow();
 
             // a real fix arrived after the watchdog decided we were stale
             if (!fixLost && _lastRealFixAt is { } recent && now - recent < staleAfter)
@@ -168,18 +186,25 @@ internal class PositionStateMachine(
 
             transitioned = SetState(verdict.State);
 
-            // one unavailable per episode, reset when a fix is next accepted
-            if (verdict.Unusable && !_unavailableRaisedForCurrentEpisode)
+            if (verdict.Reason != UnusableReason.None)
             {
-                _unavailableRaisedForCurrentEpisode = true;
-                raiseUnavailable = true;
+                _isDefensible = false;
+
+                // announce each distinct reason once per episode, so crossing
+                // the second threshold is still audible after the first
+                if (verdict.Reason != _announcedReason)
+                {
+                    _announcedReason = verdict.Reason;
+                    announce = verdict.Reason;
+                }
             }
         }
 
         RaiseIfChanged(transitioned);
 
-        if (raiseUnavailable)
-            _locationBecameUnavailable?.Invoke(this, EventArgs.Empty);
+        if (announce != UnusableReason.None)
+            _locationBecameUnavailable?.Invoke(
+                this, new PositionUnusableEventArgs(announce, now));
     }
 
     // returns the new state only if it changed, so events are raised
@@ -216,8 +241,8 @@ internal class PositionStateMachine(
 
         _lastRealFixAt = observedAt;
     }
-    
-    private readonly record struct StaleVerdict(PositionState State, bool Unusable);
+
+    private readonly record struct StaleVerdict(PositionState State, UnusableReason Reason);
 
     private static StaleVerdict Judge(
         DateTimeOffset? lastRealFixAt,
@@ -230,17 +255,26 @@ internal class PositionStateMachine(
         // no anchor means nothing to extrapolate from, and nothing whose
         // uncertainty could grow - so the usual give-up tests can never fire
         if (lastRealFixAt is not { } last)
-            return new StaleVerdict(PositionState.NoFix, Unusable: true);
+            return new StaleVerdict(PositionState.NoFix, UnusableReason.NoAnchor);
+
+        if (fixLost)
+            return new StaleVerdict(PositionState.DeadReckoning, UnusableReason.FixLost);
 
         // the first tick into DeadReckoning sees the filter's unaided
         // prediction; DR has not aided it yet, so allow one interval
-        var settled = current == PositionState.DeadReckoning;
+        if (current != PositionState.DeadReckoning)
+            return new StaleVerdict(PositionState.DeadReckoning, UnusableReason.None);
 
-        var unusable = fixLost ||
-                       (settled &&
-                        (uncertaintyRadiusMeters >= state.MaxUsefulUncertaintyMeters ||
-                         now - last >= state.MaxBlindDuration));
+        // Blind time is checked first on purpose. It is the reason that does
+        // not depend on a model being calibrated, so when both hold it is the
+        // one worth naming.
+        if (now - last >= state.MaxBlindDuration)
+            return new StaleVerdict(PositionState.DeadReckoning, UnusableReason.BlindTooLong);
 
-        return new StaleVerdict(PositionState.DeadReckoning, unusable);
+        if (uncertaintyRadiusMeters >= state.MaxUsefulUncertaintyMeters)
+            return new StaleVerdict(
+                PositionState.DeadReckoning, UnusableReason.UncertaintyTooLarge);
+
+        return new StaleVerdict(PositionState.DeadReckoning, UnusableReason.None);
     }
 }

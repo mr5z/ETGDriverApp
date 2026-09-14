@@ -27,6 +27,7 @@ internal class StalenessWatchdog(
 
     private DateTimeOffset _lastRealFixAt;
     private DateTimeOffset _lastForcedFixAt = DateTimeOffset.MinValue;
+    private double _lastTracedUncertainty;
     private Task? _loop;
 
     void IStalenessWatchdog.Start()
@@ -35,6 +36,7 @@ internal class StalenessWatchdog(
             return;
 
         _lastRealFixAt = clock.GetUtcNow();
+        _lastTracedUncertainty = 0;
         pipeline.PositionUpdated += OnPositionUpdated;
 
         // PeriodicTimer, not IDispatcherTimer: the dispatcher does not tick
@@ -141,11 +143,27 @@ internal class StalenessWatchdog(
         {
             var uncertainty = pipeline.PredictUncertaintyMeters(now);
 
+            // Covariance may only shrink on evidence, and while blind there
+            // is none - so a fall here is a contradiction worth naming. It
+            // caught the DR feedback loop: uncertainty dropping 141m -> 29m
+            // in four seconds on samples derived from the filter's own past
+            // output. A zero-velocity update can legitimately tighten things
+            // a little, since a detected stop is real evidence, but it is
+            // evidence about velocity and should not collapse position.
+            if (_lastTracedUncertainty > 0 && uncertainty < _lastTracedUncertainty * 0.8)
+            {
+                diagnostics.Trace(TraceCategory,
+                    $"uncertainty FELL while blind: {_lastTracedUncertainty:F0}m -> " +
+                    $"{uncertainty:F0}m since={sinceFix.TotalSeconds:F1}s");
+            }
+
+            _lastTracedUncertainty = uncertainty;
+
             // The number the state machine gives up on is the filter's
-            // covariance, not the accuracy of whatever position is actually
-            // published. When a DR estimate is live those two should track
-            // each other; if they diverge, the app is discarding a position
-            // it is still publishing.
+            // covariance. Published radius now derives from it for DR
+            // samples, so the two agreeing is expected; what is worth
+            // watching is the SOURCE, since a real fix landing here means
+            // the watchdog and the pipeline disagree about staleness.
             if (diagnostics.IsEnabled)
             {
                 var published = pipeline.Current;
@@ -154,8 +172,8 @@ internal class StalenessWatchdog(
                     $"stale since={sinceFix.TotalSeconds:F1}s " +
                     $"filter={uncertainty:F0}m " +
                     $"published={published?.EffectiveRadiusMeters:F0}m " +
-                    $"source={published?.SourceType} " +
-                    $"age={(published is null ? 0 : (now - published.Timestamp).TotalSeconds):F1}s");
+                    $"claimed={published?.AccuracyMeters:F0}m " +
+                    $"source={published?.SourceType}");
             }
 
             stateMachine.NotifyFixStale(uncertainty);

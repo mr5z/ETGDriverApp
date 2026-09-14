@@ -22,7 +22,6 @@ internal class AccelerometerMotionStateSource(
     private int _candidateCount;
 
     private EventHandler<MotionState>? _motionStateChanged;
-
     event EventHandler<MotionState> IMotionStateProvider.MotionStateChanged
     {
         add => _motionStateChanged += value;

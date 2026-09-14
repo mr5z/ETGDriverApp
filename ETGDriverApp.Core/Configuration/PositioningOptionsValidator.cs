@@ -34,6 +34,7 @@ public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOp
         Range(failures, "Filter.InitialVelocityVarianceM2PerS2", o.Filter.InitialVelocityVarianceM2PerS2, 1, 10_000);
         Range(failures, "Filter.ReportedSpeedAccuracyMps", o.Filter.ReportedSpeedAccuracyMps, 0.1, 50);
         Range(failures, "Filter.StationaryUpdateAccuracyMps", o.Filter.StationaryUpdateAccuracyMps, 0.01, 10);
+        Range(failures, "Filter.MaxVelocityUpdateShiftMeters", o.Filter.MaxVelocityUpdateShiftMeters, 0, 10_000);
 
         // A zero-velocity update exists to overrule a coasting velocity state
         // that nothing else can reach. Weaker evidence than an ordinary speed

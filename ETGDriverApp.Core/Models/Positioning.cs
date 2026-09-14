@@ -39,6 +39,28 @@ public enum PositionState
     Reacquiring
 }
 
+// Why the position stopped being defensible. Carried on the event rather
+// than inferred, because the two thresholds have different remedies: one
+// says "we have been blind too long", the other says "the estimate has
+// spread too far". Collapsing them into a bare notification meant whichever
+// fired first silenced the other for the rest of the episode.
+public enum UnusableReason
+{
+    None,
+
+    // no anchor at all - nothing to extrapolate from
+    NoAnchor,
+
+    // the filter has no state to report on; the position is gone, not vague
+    FixLost,
+
+    // State.MaxUsefulUncertaintyMeters
+    UncertaintyTooLarge,
+
+    // State.MaxBlindDuration
+    BlindTooLong
+}
+
 public enum RejectionReason
 {
     None,
@@ -113,12 +135,36 @@ public record NormalizedPosition(
     PositionSourceType SourceType,
     DateTimeOffset Timestamp,
     PositionState State,
-    double? UncertaintyRadiusMeters = null)
+    double? UncertaintyRadiusMeters = null,
+
+    // Whether the state machine still considers this position defensible.
+    // Defaults true so a position built without an opinion is not silently
+    // treated as worthless; the pipeline sets it from the state machine.
+    bool IsDefensible = true)
 {
-    // the radius consumers should draw: reported accuracy for a real fix,
-    // the state machine's grown uncertainty while extrapolating
+    // The radius consumers should draw, and the one every arrival decision
+    // is measured against.
+    //
+    // For a real fix this is the reported accuracy, widened by the filter's
+    // own uncertainty if that is larger.
+    //
+    // For an EXTRAPOLATION it is the filter's uncertainty alone, and taking
+    // the max here was wrong twice over. First, the filter has already
+    // folded DR's self-reported accuracy in as the measurement variance
+    // r = accuracy^2, so the max applies the same pessimism a second time.
+    // Second, DR's self-report is quadratic in elapsed time and outruns
+    // reality badly: a captured five-minute outage ended with DR claiming
+    // 3,859 m, the filter saying 424 m, and the true error 307 m. Every
+    // arrival test - the drift gate, ClearOf, WithinNoiseOf, the unverified
+    // enter bound - was running on the 3,859.
+    //
+    // AccuracyMeters is still carried, unchanged, as provenance: it is what
+    // the producer claimed, and diagnostics compare the two deliberately.
     public double EffectiveRadiusMeters =>
-        Math.Max(
-            UncertaintyRadiusMeters ?? 0,
-            Accuracy.IsKnown(AccuracyMeters) ? AccuracyMeters : 0);
+        SourceType == PositionSourceType.DeadReckoned
+            ? UncertaintyRadiusMeters ?? FallbackRadius
+            : Math.Max(UncertaintyRadiusMeters ?? 0, FallbackRadius);
+
+    private double FallbackRadius =>
+        Accuracy.IsKnown(AccuracyMeters) ? AccuracyMeters : 0;
 }

@@ -180,11 +180,22 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // says nothing worth asking a human about, and the offer is withheld.
         // That bound is the only place DR error and fence radius are ever
         // compared.
+        //
+        // IsDefensible is deliberately NOT consulted here, and that was a
+        // considered choice rather than an oversight. A suppressed enter asks
+        // a human a question; it triggers nothing automatic, the confirmation
+        // is stamped Suppressed, and a later Trusted fix can still contradict
+        // it through ArrivalStanding. Blind time is the wrong gate for that
+        // question - captured runs at 300s blind produced true errors of
+        // 1691m, 95m and 10m, so elapsed time separates none of those cases.
+        // The error radius does: at MaxUnverifiedRadiusMultiplier = 3 the
+        // first is refused and the other two are offered. State.MaxBlindSeconds
+        // and State.MaxUsefulUncertaintyMeters therefore remain diagnostic
+        // signals to the host, and gate no arrival.
         var offeringUnverifiedEnter =
             inside &&
             confidence == GeofenceEventConfidence.Suppressed &&
-            position.EffectiveRadiusMeters <=
-                region.RadiusMeters * geofence.MaxUnverifiedRadiusMultiplier;
+            position.EffectiveRadiusMeters <= region.RadiusMeters * geofence.MaxUnverifiedRadiusMultiplier;
 
         // a crossing inside our own error radius is indistinguishable from drift
         if (!offeringUnverifiedEnter && offset.WithinNoiseOf(position.EffectiveRadiusMeters))
@@ -228,11 +239,9 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
 
         tracked.Inside = inside;
 
-        // an unverified departure is held; an unverified arrival is not
         if (confidence == GeofenceEventConfidence.Suppressed && !inside)
         {
             tracked.PendingFromDeadReckoning = transition;
-
             return;
         }
 
@@ -268,8 +277,17 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
     // Every arm is explicit. This used to end in `_ => Trusted`, which made
     // the highest grade of evidence the fall-through - so any state added
     // later would be Trusted until someone remembered this switch.
-    private static GeofenceEventConfidence ConfidenceFor(NormalizedPosition position) =>
-        position.State switch
+    private static GeofenceEventConfidence ConfidenceFor(NormalizedPosition position)
+    {
+        // The state machine has declared this position indefensible. It used
+        // to say so only by raising an event, and the only subscriber wrote
+        // a log line - so MaxBlindSeconds and MaxUsefulUncertaintyMeters cut
+        // nothing at all. A captured run kept offering arrivals for three and
+        // a half minutes after LocationUnavailable fired.
+        if (!position.IsDefensible)
+            return GeofenceEventConfidence.Suppressed;
+
+        return position.State switch
         {
             // no position at all cannot be evidence of anything
             PositionState.NoFix or PositionState.DeadReckoning =>
@@ -280,4 +298,5 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
                 GeofenceEventConfidence.Trusted,
             _ => GeofenceEventConfidence.Suppressed
         };
+    }
 }

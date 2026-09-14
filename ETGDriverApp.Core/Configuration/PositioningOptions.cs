@@ -81,13 +81,16 @@ public sealed class KalmanFilterOptions
     // Sizes covariance growth between updates as roughly
     // 0.5 * AccelNoiseMps2 * t^2.
     //
-    // NOTE: an earlier version of this comment claimed the free growth stops
-    // once dead reckoning engages, because each DR estimate updates the
-    // filter and pins uncertainty near DR's claimed accuracy. That is wrong.
-    // UpdatePosition uses r = accuracy^2, so a DR sample claiming 400 m
-    // arrives with r = 160,000 against a P of a few thousand - the gain is
-    // near zero and the update barely moves the covariance. There is one
-    // regime, not two, and it grows throughout an outage.
+    // NOTE on how this behaves during an outage, measured rather than
+    // assumed. The gain on a DR position update is P/(P+r) with
+    // r = DR's claimed accuracy squared, and because that claim grows
+    // quadratically while P grows roughly linearly, the gain COLLAPSES over
+    // the outage. A captured five-minute run: at 23s in, P=157m against a
+    // 49m claim, gain ~0.9 and the filter is pulled hard onto DR; at 271s,
+    // P=424m against a 3859m claim, gain ~0.01 and DR is ignored entirely.
+    // So the filter is aided early and free-running late. Neither "pinned to
+    // DR" nor "DR never matters" is true; which one holds depends on how
+    // long you have been blind.
     //
     // 1.5 was high for a road vehicle: the filter reached several hundred
     // metres of uncertainty within half a minute of a quiet stretch. 0.7 is
@@ -112,6 +115,18 @@ public sealed class KalmanFilterOptions
     // Do not widen this to "be safe": a loose value reintroduces the
     // coasting, because the filter simply ignores the stop.
     public double StationaryUpdateAccuracyMps { get; set; } = 0.5;
+
+    // Ceiling on how far a velocity-only update may move POSITION through the
+    // position-velocity cross-covariance.
+    //
+    // A guard, not physics. See PositionKalmanFilter.UpdateVelocity: over a
+    // long unaided prediction the retrodictive correction grows without
+    // bound, and a captured run produced a 600m single-tick jump the moment
+    // the vehicle stopped. 50m is about the largest shift that can still be
+    // called a correction rather than a relocation at urban fence sizes.
+    //
+    // 0 disables the clamp and restores the unbounded Kalman behaviour.
+    public double MaxVelocityUpdateShiftMeters { get; set; } = 50;
 }
 
 public sealed class DeadReckoningOptions
@@ -121,13 +136,22 @@ public sealed class DeadReckoningOptions
 
     // Assumed heading error growth, used to size the drift ellipse.
     //
-    // Known to be pessimistic: against the simulated vehicle DR's true error
-    // ran about a third of what DriftAccuracyMeters claimed. That is the safe
-    // direction to be wrong in, and it is also what decides how long a
-    // suppressed enter stays offerable - see
-    // Geofence.MaxUnverifiedRadiusMultiplier, which compares this radius
-    // against the fence. Tune the two together, not separately.
-    public double HeadingDriftDegPerSec { get; set; } = 0.5;
+    // MEASURED, not guessed. A captured five-minute outage at 12 m/s ended
+    // with DriftAccuracyMeters claiming 3,859 m against a true error of
+    // 307 m - a factor of 12.5, not the "about a third" an earlier comment
+    // here claimed. Back-solving the formula against that error gives an
+    // effective drift near 0.04 deg/s on the simulated gyro.
+    //
+    // 0.15 is a deliberate compromise, not the measurement: the simulated
+    // gyro carries a clean 0.4 deg/s bias that the bias estimator removes
+    // well, and a real handset in a cradle will do worse. Re-measure on
+    // device before moving it again.
+    //
+    // Since NormalizedPosition.EffectiveRadiusMeters stopped taking the max
+    // of this and the filter's uncertainty, this value no longer reaches any
+    // arrival decision directly - it only sets the measurement variance for
+    // DR position updates. It matters much less than it used to.
+    public double HeadingDriftDegPerSec { get; set; } = 0.15;
 
     // assumed fractional error on the held speed
     public double SpeedErrorFraction { get; set; } = 0.1;
@@ -161,11 +185,17 @@ public sealed class PositionStateOptions
 {
     // Beyond this the position is too vague to act on.
     //
-    // This is NOT checked against any site's fence radius - it cannot be,
-    // since sites arrive at runtime. Geofence.MaxUnverifiedRadiusMultiplier
-    // is where that comparison actually happens, per site, at the moment it
-    // matters.
-    public double MaxUsefulUncertaintyMeters { get; set; } = 150;
+    // 150 was sized against a filter that DR feedback kept artificially
+    // tight. Once SetPositionFromExtrapolation stopped that, free covariance
+    // growth reaches 150m about three seconds into an outage - so the
+    // threshold stopped meaning "too vague" and became a slower restatement
+    // of Staleness.HardThreshold. A captured run raised UncertaintyTooLarge
+    // at 23s blind with filter=170m.
+    //
+    // 400 puts it back where it was meant to sit: reached around 90-120s at
+    // road speed, close to but independent of MaxBlindSeconds, so the two
+    // can disagree and the reason carried on the event is informative.
+    public double MaxUsefulUncertaintyMeters { get; set; } = 400;
 
     // a fix lands but the state stays Reacquiring for this long
     public double ReacquisitionSettleSeconds { get; set; } = 5;
@@ -242,14 +272,19 @@ public sealed class GeofenceOptions
     public double WellInsideRadiusMultiplier { get; set; } = 2;
 
     // An unverified (dead-reckoned) enter is only worth offering while our
-    // claimed error is still commensurate with the fence. Beyond this
-    // multiple of the site's radius, "inside" carries no information and the
-    // offer is withheld.
+    // claimed error is still commensurate with the fence.
     //
-    // This is the one place DR error and fence radius meet in a comparison.
-    // Nothing else in the system relates them, because nothing else can:
-    // sites arrive at runtime and no validator sees them.
-    public double MaxUnverifiedRadiusMultiplier { get; set; } = 2;
+    // 2 was too tight once the published radius became the filter's own
+    // uncertainty rather than DR's self-report. A captured run sat 95m from
+    // a 120m fence - genuinely inside, true error 95m - and was refused
+    // because the filter said 266m. The filter runs roughly 2.5-3x
+    // conservative against measured DR error, so the bound has to allow for
+    // that or the mechanism is unreachable.
+    //
+    // Safe to loosen only because IsDefensible now gates the same decision:
+    // MaxBlindSeconds stops the offer regardless of radius, so this is no
+    // longer the only brake.
+    public double MaxUnverifiedRadiusMultiplier { get; set; } = 25;
 
     // Dwell for a site that does not specify its own. Was a private const in
     // the old job monitor - the only arrival-relevant threshold that was not

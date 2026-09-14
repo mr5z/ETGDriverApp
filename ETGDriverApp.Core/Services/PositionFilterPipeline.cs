@@ -12,7 +12,7 @@ public interface IPositionFilterPipeline
 
     event EventHandler<NormalizedPosition> PositionUpdated;
 
-    event EventHandler LocationUnavailable;
+    event EventHandler<PositionUnusableEventArgs> LocationUnavailable;
 
     // returns the position this sample produced, or null if it was rejected
     Task<NormalizedPosition?> IngestAsync(RawPositionSample sample, CancellationToken ct = default);
@@ -75,7 +75,6 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         _stateMachine.LocationBecameUnavailable += OnLocationBecameUnavailable;
     }
 
-
     private EventHandler<PositionEvaluatedEventArgs>? _positionEvaluated;
     event EventHandler<PositionEvaluatedEventArgs> IPositionFilterPipeline.PositionEvaluated
     {
@@ -90,8 +89,8 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         remove => _positionUpdated -= value;
     }
 
-    private EventHandler? _locationUnavailable;
-    event EventHandler IPositionFilterPipeline.LocationUnavailable
+    private EventHandler<PositionUnusableEventArgs>? _locationUnavailable;
+    event EventHandler<PositionUnusableEventArgs> IPositionFilterPipeline.LocationUnavailable
     {
         add => _locationUnavailable += value;
         remove => _locationUnavailable -= value;
@@ -161,6 +160,22 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
                 _filter.Initialize(
                     sample.Latitude, sample.Longitude, sample.AccuracyMeters, sample.Timestamp);
             }
+            else if (sample.IsDeadReckoned)
+            {
+                // Adopt the extrapolated POSITION - it follows turns the
+                // constant-velocity prediction cannot - but leave the
+                // covariance to grow. A DR sample is this filter's own past
+                // output plus gyro integration; treating it as a measurement
+                // let the filter confirm its own belief and collapse its
+                // uncertainty on no evidence.
+                _filter.SetPositionFromExtrapolation(sample.Latitude, sample.Longitude);
+
+                // The stationary update stays. Motion state comes from an
+                // accelerometer the filter has never touched, so a detected
+                // stop is genuinely new, and it is the only thing that can
+                // overrule a coasting velocity.
+                ApplyVelocityUpdate(sample, filterOptions);
+            }
             else
             {
                 _filter.UpdatePosition(sample.Latitude, sample.Longitude, sample.AccuracyMeters);
@@ -187,10 +202,14 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             if (tier == AccuracyTier.Good && sample.IsObserved)
                 _deadReckoning.RecalibrateAgainst(matched, _filter.SpeedMps);
 
+            // Both are read AFTER NotifyFixAccepted, so an accepted fix that
+            // just restored defensibility is published as defensible rather
+            // than carrying the previous tick's verdict.
             var result = matched with
             {
                 State = _stateMachine.CurrentState,
-                UncertaintyRadiusMeters = _filter.PositionUncertaintyMeters
+                UncertaintyRadiusMeters = _filter.PositionUncertaintyMeters,
+                IsDefensible = _stateMachine.IsDefensible
             };
 
             Volatile.Write(ref _published, result);
@@ -265,8 +284,8 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         _gate.Dispose();
     }
 
-    private void OnLocationBecameUnavailable(object? sender, EventArgs e) =>
-        _locationUnavailable?.Invoke(this, EventArgs.Empty);
+    private void OnLocationBecameUnavailable(object? sender, PositionUnusableEventArgs e) =>
+        _locationUnavailable?.Invoke(this, e);
 
     // caller holds _gate.
     //
@@ -304,12 +323,14 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         if (sample.IsObserved)
         {
             _filter.UpdateVelocity(speed, course, filter.ReportedSpeedAccuracyMps);
-
             return;
         }
 
         if (sample.IsDeadReckoned && speed == 0)
+        {
+            _filter.DecouplePositionFromVelocity();
             _filter.UpdateVelocity(0, course, filter.StationaryUpdateAccuracyMps);
+        }
     }
 
     private void RaiseEvaluated(

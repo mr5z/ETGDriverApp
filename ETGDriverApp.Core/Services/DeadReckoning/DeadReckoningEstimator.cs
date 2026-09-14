@@ -48,6 +48,22 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
     private double _gyroBiasDegPerSec;
     private DateTimeOffset? _lastOffsetUpdateAt;
+    
+    private bool _belowFloorTraced;
+
+    // Whether heading has been corrected continuously since the last time
+    // extrapolation began. False across any gap - a Degraded stretch, an
+    // outage - during which the gyro integrated with nothing to check it.
+    //
+    // The first recalibration after such a gap produces an offset change
+    // that is mostly catch-up, not bias. MaxBiasSpan was meant to catch that
+    // but is a duration test, and a 15s Degraded episode passes it easily:
+    // in a captured run one such episode drove the bias estimate from 0.39
+    // to -0.32 in a single tick, and it was still recovering (0.12) when the
+    // blackout started. The residual drift that produced was 0.28 deg/s
+    // against 0.05 the run before, and DR error at 200s went from 300m to
+    // 1200m. Same code, same config, different dice.
+    private bool _headingContinuous;
 
     // error accumulated since the anchor; stopping adds none but removes none.
     // Seeded on the first anchor, since the floor is configurable now.
@@ -91,7 +107,15 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     void IDeadReckoningEstimator.SetActive(bool active)
     {
         lock (_sync)
+        {
+            // Going active starts a stretch with no heading correction in
+            // it. Whatever offset change the next recalibration sees spans
+            // that stretch, so it cannot be read as bias.
+            if (active && !_active)
+                _headingContinuous = false;
+
             _active = active;
+        }
     }
 
     void IDeadReckoningEstimator.Start()
@@ -187,11 +211,20 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
         if (travelled <= floor)
         {
-            // a stationary vehicle produces no usable bearing; not a rejection
-            Trace($"recal: travelled={travelled:F1} below floor={floor:F1}");
+            // a stationary vehicle produces no usable bearing; not a
+            // rejection. Traced once per stationary spell rather than every
+            // tick - a parked vehicle would otherwise fill the log with
+            // identical lines and bury everything else.
+            if (!_belowFloorTraced)
+            {
+                Trace($"recal: travelled={travelled:F1} below floor={floor:F1} (repeats suppressed)");
+                _belowFloorTraced = true;
+            }
 
             return;
         }
+
+        _belowFloorTraced = false;
 
         // Across an outage this bearing is a catch-up vector, not a heading: it
         // points from where DR drifted to where the vehicle actually is. Bound it
@@ -224,9 +257,16 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     {
         var newOffset = Geo.NormalizeDegrees(impliedHeading - _headingDegrees);
 
-        // the offset only moves if the corrected heading is still drifting;
-        // feed that residual back into the bias until it stops
-        if (_lastOffsetUpdateAt is { } previous &&
+        // The offset only moves if the corrected heading is still drifting;
+        // feed that residual back into the bias until it stops.
+        //
+        // Both guards are needed and they catch different things.
+        // _headingContinuous rejects the FIRST correction after any gap,
+        // however short - that change is catch-up by construction. MaxBiasSpan
+        // rejects a long span between two otherwise continuous corrections.
+        // A duration test alone cannot tell a 15s gap from a slow 15s tick.
+        if (_headingContinuous &&
+            _lastOffsetUpdateAt is { } previous &&
             at - previous is var span &&
             span > TimeSpan.Zero && span <= dr.MaxBiasSpan)
         {
@@ -236,9 +276,16 @@ internal class HeadingIntegrationDeadReckoningEstimator(
                 _gyroBiasDegPerSec + dr.BiasGain * residual,
                 -dr.MaxBiasDegPerSec, dr.MaxBiasDegPerSec);
         }
+        else if (!_headingContinuous)
+        {
+            Trace($"bias held: first recal after a gap, offset {_headingOffsetDegrees:F1} -> {newOffset:F1}");
+        }
 
+        // the offset itself is always adopted - catch-up is exactly what it
+        // is for. Only the bias inference is withheld.
         _headingOffsetDegrees = newOffset;
         _lastOffsetUpdateAt = at;
+        _headingContinuous = true;
     }
 
     private void OnHeadingRateChanged(object? sender, double degPerSec)
@@ -352,7 +399,7 @@ internal class DeadReckoningFeed(
     IPositionStateMachine stateMachine)
 {
     private readonly Lock _sync = new();
-
+    
     private bool _started;
 
     public event EventHandler<Exception>? BridgeFaulted;
