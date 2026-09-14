@@ -10,6 +10,14 @@ namespace ETGDriverApp.Core.Configuration;
 // of "positioning quietly behaves differently in the field". The hard bounds
 // below are the safety envelope; they are NOT tuning knobs and are not
 // configurable by design.
+//
+// Note on what is deliberately NOT checked here: there is no rule deriving a
+// threshold from the filter's covariance growth. Such a rule would have to
+// assume a growth model, and the filter has two very different regimes -
+// free growth before dead reckoning engages, and growth pinned near DR's
+// claimed accuracy once it does. A rule true in one regime is misleading in
+// the other, and a validator that is wrong half the time is worse than no
+// validator. The relationships below hold in both.
 public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOptions>
 {
     public ValidateOptionsResult Validate(string? name, PositioningOptions o)
@@ -28,6 +36,16 @@ public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOp
         Range(failures, "Filter.AccelNoiseMps2", o.Filter.AccelNoiseMps2, 0.05, 20);
         Range(failures, "Filter.InitialVelocityVarianceM2PerS2", o.Filter.InitialVelocityVarianceM2PerS2, 1, 10_000);
         Range(failures, "Filter.ReportedSpeedAccuracyMps", o.Filter.ReportedSpeedAccuracyMps, 0.1, 50);
+        Range(failures, "Filter.StationaryUpdateAccuracyMps", o.Filter.StationaryUpdateAccuracyMps, 0.01, 10);
+
+        // A zero-velocity update exists to overrule a coasting velocity state
+        // that nothing else can reach. Weaker evidence than an ordinary speed
+        // reading would be ignored by the filter, leaving the knob present
+        // and doing nothing - the worst kind of configuration.
+        if (o.Filter.StationaryUpdateAccuracyMps >= o.Filter.ReportedSpeedAccuracyMps)
+            failures.Add(
+                "Filter.StationaryUpdateAccuracyMps must be below ReportedSpeedAccuracyMps, " +
+                "or a detected stop cannot correct the filter's velocity.");
 
         Range(failures, "DeadReckoning.BaseAccuracyMeters", o.DeadReckoning.BaseAccuracyMeters, 1, 500);
         Range(failures, "DeadReckoning.HeadingDriftDegPerSec", o.DeadReckoning.HeadingDriftDegPerSec, 0, 30);
@@ -55,6 +73,18 @@ public sealed class PositioningOptionsValidator : IValidateOptions<PositioningOp
         // the watchdog can only notice staleness on a tick
         if (o.Staleness.TickIntervalSeconds > o.Staleness.SoftThresholdSeconds)
             failures.Add("Staleness.TickIntervalSeconds must not exceed SoftThresholdSeconds.");
+
+        // The escalation path must be walkable. Between noticing staleness at
+        // the soft threshold and declaring blindness at the hard one, there
+        // has to be room for at least one forced fix to be permitted -
+        // otherwise the watchdog is barred from attempting the recovery it
+        // exists to attempt, and the system escalates to unusable without
+        // ever having tried.
+        if (o.Staleness.MinTimeBetweenForcedFixesSeconds >
+            o.Staleness.HardThresholdSeconds - o.Staleness.SoftThresholdSeconds)
+            failures.Add(
+                "Staleness.MinTimeBetweenForcedFixesSeconds must fit between SoftThresholdSeconds " +
+                "and HardThresholdSeconds, or no forced fix can be attempted before we give up.");
 
         // giving up before the first stale notification would be unreachable
         if (o.State.MaxBlindSeconds <= o.Staleness.HardThresholdSeconds)

@@ -61,7 +61,7 @@ internal partial class MainViewModel : PageViewModel
         IPositionFilterPipeline pipeline,
         IPositionStateMachine stateMachine,
         IJobSiteMonitor jobs,
-        PositioningDiagnostics diagnostics,
+        IPositioningDiagnostics diagnostics,
         SimulatedLocationListener simulator)
     {
         _session = session;
@@ -320,7 +320,7 @@ internal partial class MainViewModel : PageViewModel
                 Append($"DR estimate {position.Latitude:F5},{position.Longitude:F5}");
 
             if (position.SourceType == PositionSourceType.DeadReckoned &&
-                _simulator.LastEmitted is { } truth)
+                _simulator.LastEmitted?.Location is { } truth)
             {
                 var error = Geo.DistanceMeters(
                     position.Latitude, position.Longitude, truth.Latitude, truth.Longitude);

@@ -61,21 +61,49 @@ public sealed class PlausibilityOptions
     // prediction before it is treated as a jump
     public double MaxInnovationSigma { get; set; } = 5;
 
-    // absurdity ceiling that holds regardless of what the filter believes
+    // Absurdity ceiling that holds regardless of what the filter believes.
+    //
+    // Also the speed term in AdmissionGate's reachability frame: this times
+    // State.MaxBlindSeconds is how far a single unconfirmed fix is allowed
+    // to move the track while extrapolating.
     public double MaxPlausibleSpeedKph { get; set; } = 300;
 }
 
 public sealed class KalmanFilterOptions
 {
-    // acceleration uncertainty: how hard the vehicle can plausibly change
-    // velocity between updates
-    public double AccelNoiseMps2 { get; set; } = 1.5;
+    // Acceleration uncertainty: how hard the vehicle can plausibly change
+    // velocity between updates.
+    //
+    // Sizes covariance growth between updates as roughly
+    // 0.5 * AccelNoiseMps2 * t^2. Note that this free growth only applies
+    // BEFORE dead reckoning engages - once DR is ingesting, each estimate
+    // updates the filter and pins uncertainty near DR's own claimed
+    // accuracy. The two regimes behave very differently and a log showing
+    // one says nothing about the other.
+    //
+    // 1.5 was high for a road vehicle: the filter reached several hundred
+    // metres of uncertainty within half a minute of a quiet stretch. 0.7 is
+    // a more honest figure and leaves the escalation path room to work.
+    public double AccelNoiseMps2 { get; set; } = 0.7;
 
     // no velocity information at initialization, so start wide
     public double InitialVelocityVarianceM2PerS2 { get; set; } = 100;
 
     // assumed accuracy of a platform-reported speed/course pair
     public double ReportedSpeedAccuracyMps { get; set; } = 1.0;
+
+    // Assumed accuracy of a zero-velocity update, applied when dead
+    // reckoning reports the vehicle stationary during an outage.
+    //
+    // Tighter than ReportedSpeedAccuracyMps on purpose. "The accelerometer
+    // says we are not moving" is a stronger statement than any GPS-derived
+    // speed, and it has to be strong enough to overcome a coasting velocity
+    // state that the DR position update - arriving with hundreds of metres
+    // of claimed accuracy - cannot touch.
+    //
+    // Do not widen this to "be safe": a loose value reintroduces the
+    // coasting, because the filter simply ignores the stop.
+    public double StationaryUpdateAccuracyMps { get; set; } = 0.5;
 }
 
 public sealed class DeadReckoningOptions
@@ -83,7 +111,15 @@ public sealed class DeadReckoningOptions
     // floor on the accuracy of an extrapolation, even one second in
     public double BaseAccuracyMeters { get; set; } = 30;
 
-    // assumed heading error growth used to size the drift ellipse
+    // Assumed heading error growth, used to size the drift ellipse.
+    //
+    // Known to be pessimistic: against the simulated vehicle DR's true error
+    // ran about a third of what DriftAccuracyMeters claimed. That is the safe
+    // direction to be wrong in, but it is also why
+    // State.MaxUsefulUncertaintyMeters almost never fires - DR's self-reported
+    // error outruns reality and MaxBlindSeconds gets there first. Tune this
+    // down to match measurement and that threshold comes alive, so the two
+    // want re-checking together rather than separately.
     public double HeadingDriftDegPerSec { get; set; } = 0.5;
 
     // assumed fractional error on the held speed
@@ -116,15 +152,21 @@ public sealed class DeadReckoningOptions
 
 public sealed class PositionStateOptions
 {
-    // beyond this the position is too vague to act on: wider than any pickup
-    // fence, so a geofence decision could not be defended
+    // Beyond this the position is too vague to act on: wider than any pickup
+    // fence, so a geofence decision could not be defended.
+    //
+    // In practice this rarely fires today - see HeadingDriftDegPerSec.
     public double MaxUsefulUncertaintyMeters { get; set; } = 150;
 
     // a fix lands but the state stays Reacquiring for this long
     public double ReacquisitionSettleSeconds { get; set; } = 5;
 
-    // however confident the filter is, a position no real fix has touched in
-    // this long cannot be defended
+    // However confident the filter is, a position no real fix has touched in
+    // this long cannot be defended.
+    //
+    // Also the time base for AdmissionGate's reachability frame: this times
+    // Plausibility.MaxPlausibleSpeedKph bounds how far a single unconfirmed
+    // fix may relocate the track.
     public double MaxBlindSeconds { get; set; } = 90;
 
     public TimeSpan ReacquisitionSettleDuration =>
@@ -136,17 +178,20 @@ public sealed class PositionStateOptions
 public sealed class StalenessOptions
 {
     // no fix for this long: ask the platform for one
-    public double SoftThresholdSeconds { get; set; } = 12;
+    public double SoftThresholdSeconds { get; set; } = 6;
 
     // no fix for this long: tell the state machine we are blind.
     // PositionStateMachine reads this same value - it used to keep a private
     // copy that a comment asked you to keep in sync by hand.
-    public double HardThresholdSeconds { get; set; } = 20;
+    //
+    // Also bounds how long AdmissionGate will hold an unconfirmed relocation
+    // candidate waiting for a second fix to agree with it.
+    public double HardThresholdSeconds { get; set; } = 10;
 
     public double TickIntervalSeconds { get; set; } = 2;
 
     // forced fixes are expensive; never more often than this
-    public double MinTimeBetweenForcedFixesSeconds { get; set; } = 15;
+    public double MinTimeBetweenForcedFixesSeconds { get; set; } = 8;
 
     public TimeSpan SoftThreshold => TimeSpan.FromSeconds(SoftThresholdSeconds);
 

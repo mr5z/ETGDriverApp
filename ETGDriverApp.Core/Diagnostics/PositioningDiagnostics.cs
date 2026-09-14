@@ -10,6 +10,8 @@ namespace ETGDriverApp.Core.Diagnostics;
 // formatting cost disappears entirely when nobody is attached.
 public interface IPositioningDiagnostics
 {
+    event EventHandler<PositioningTraceEventArgs> Traced;
+    
     bool IsEnabled { get; }
 
     void Trace(string category, string message);
@@ -19,6 +21,8 @@ public sealed class NullPositioningDiagnostics : IPositioningDiagnostics
 {
     public static readonly NullPositioningDiagnostics Instance = new();
 
+    public event EventHandler<PositioningTraceEventArgs>? Traced;
+    
     public bool IsEnabled => false;
 
     public void Trace(string category, string message)
@@ -31,8 +35,7 @@ public sealed class NullPositioningDiagnostics : IPositioningDiagnostics
 public sealed class PositioningDiagnostics : IPositioningDiagnostics
 {
     private EventHandler<PositioningTraceEventArgs>? _traced;
-
-    public event EventHandler<PositioningTraceEventArgs> Traced
+    event EventHandler<PositioningTraceEventArgs> IPositioningDiagnostics.Traced
     {
         add
         {

@@ -11,6 +11,19 @@ public enum SessionEndReason
     PermissionRevoked
 }
 
+// The result of a single-shot request, carrying WHERE IT CAME FROM.
+//
+// This used to be a bare MauiLocation?, which threw away the one thing only
+// the platform listener knew: whether the request actually produced a fix or
+// timed out into the platform's stored last-known location. Every consumer
+// then tried to recover that fact by inspecting the timestamp, which is a
+// guess about something we already had.
+public readonly record struct ForcedFix(MauiLocation Location, bool FromCache)
+{
+    public PositionSourceType SourceType =>
+        FromCache ? PositionSourceType.Cached : PositionSourceType.Forced;
+}
+
 // one subscription for the whole session, foreground and background alike
 public interface ILocationListener
 {
@@ -32,7 +45,8 @@ public interface ILocationListener
 
     Task StopAsync(CancellationToken ct = default);
 
-    Task<MauiLocation?> GetForcedFixAsync(CancellationToken ct = default);
+    // null means the platform had nothing at all to give, cached or otherwise
+    Task<ForcedFix?> GetForcedFixAsync(CancellationToken ct = default);
 }
 
 public class PositionFeed(
@@ -77,10 +91,16 @@ public class PositionFeed(
 
     public async Task ForcedFixAsync(CancellationToken ct = default)
     {
-        var location = await listener.GetForcedFixAsync(ct);
+        var fix = await listener.GetForcedFixAsync(ct);
 
-        if (location is not null)
-            await IngestAndPersistAsync(ToSample(location, PositionSourceType.Forced), ct);
+        // No age check here, and deliberately none. A cached fix is labelled
+        // as one, and what may be done with it is a question about evidence
+        // rather than about elapsed seconds: it can seed an empty filter, it
+        // cannot end a dead-reckoning episode. That policy lives in
+        // AdmissionGate, in one place, instead of being approximated by a
+        // threshold at every point of entry.
+        if (fix is { } forced)
+            await IngestAndPersistAsync(ToSample(forced.Location, forced.SourceType), ct);
     }
 
     internal static RawPositionSample ToSample(MauiLocation location, PositionSourceType source) =>

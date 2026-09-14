@@ -39,12 +39,9 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
 
     private CancellationTokenSource? _cts;
     private Task? _loop;
-    private MauiLocation? _last;
+    private ForcedFix? _last;
     private LocationSessionState _state = LocationSessionState.Stopped;
     private double _heading;
-
-    private EventHandler<MauiLocation>? _locationReceived;
-    private EventHandler<SessionEndReason>? _sessionEndedUnexpectedly;
 
     // configured before StartAsync
     public (double Lat, double Lon) From { get; set; }
@@ -61,7 +58,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
 
     public bool IsBlackedOut => DateTimeOffset.UtcNow < _blackoutUntil;
 
-    public MauiLocation? LastEmitted => _last;
+    public ForcedFix? LastEmitted => _last;
 
     public void Degrade() => _degradedUntil = DateTimeOffset.UtcNow + DegradeDuration;
 
@@ -75,12 +72,14 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     // the heading-offset trace
     public event EventHandler<int>? WaypointReached;
 
+    private EventHandler<MauiLocation>? _locationReceived;
     event EventHandler<MauiLocation> ILocationListener.LocationReceived
     {
         add => _locationReceived += value;
         remove => _locationReceived -= value;
     }
 
+    private EventHandler<SessionEndReason>? _sessionEndedUnexpectedly;
     event EventHandler<SessionEndReason> ILocationListener.SessionEndedUnexpectedly
     {
         add => _sessionEndedUnexpectedly += value;
@@ -165,7 +164,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
     }
 
     // the watchdog's escape hatch; replaying the last point keeps it quiet
-    Task<MauiLocation?> ILocationListener.GetForcedFixAsync(CancellationToken ct) =>
+    Task<ForcedFix?> ILocationListener.GetForcedFixAsync(CancellationToken ct) =>
         Task.FromResult(IsBlackedOut ? null : _last);
 
     private async Task RunAsync(CancellationToken ct)
@@ -264,7 +263,7 @@ internal class SimulatedLocationListener(SimulatedVehicleState vehicle) : ILocat
             Timestamp = DateTimeOffset.UtcNow
         };
 
-        _last = location;
+        _last = new ForcedFix(location, FromCache: false);
 
         // the vehicle keeps moving; the phone just stops hearing about it
         if (IsBlackedOut)

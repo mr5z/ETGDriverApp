@@ -110,7 +110,15 @@ internal class AppleLocationListener : ILocationListener
         return Task.CompletedTask;
     }
 
-    async Task<MauiLocation?> ILocationListener.GetForcedFixAsync(CancellationToken ct)
+    // Returns ForcedFix rather than a bare location so the two very different
+    // outcomes are distinguishable downstream.
+    //
+    // CLLocationManager.Location is whatever iOS last managed to determine.
+    // It is frequently minutes old and occasionally much worse, and nothing
+    // on the object distinguishes it from a fix taken a second ago. Only this
+    // method knows which branch produced the result, so only this method can
+    // report it without resorting to a timestamp heuristic.
+    async Task<ForcedFix?> ILocationListener.GetForcedFixAsync(CancellationToken ct)
     {
         // RequestLocation cannot run while StartUpdatingLocation is active,
         // so this waits for the next delivery and nudges iOS to produce one
@@ -134,14 +142,16 @@ internal class AppleLocationListener : ILocationListener
         {
             Interlocked.CompareExchange(ref _pendingForcedFix, null, completion);
 
-            var cached = _manager.Location;
-
-            return cached is null ? null : ToMauiLocation(cached);
+            return FromCache();
         }
 
         await timeoutCts.CancelAsync();
 
-        return await completion.Task;
+        var fresh = await completion.Task;
+
+        return fresh is null
+            ? FromCache()
+            : new ForcedFix(fresh, FromCache: false);
     }
 
     // the driver can revoke access from Settings without restarting the app
@@ -162,18 +172,31 @@ internal class AppleLocationListener : ILocationListener
 
     private void OnLocationsUpdated(CLLocation[] locations)
     {
+        if (locations.Length == 0)
+            return;
+
         // batches arrive oldest first after a background wake; passed
         // through in order because the pipeline expects a monotonic stream
         foreach (var location in locations)
-        {
-            var converted = ToMauiLocation(location);
+            _locationReceived?.Invoke(this, ToMauiLocation(location));
 
-            _locationReceived?.Invoke(this, converted);
+        // A pending forced fix is resolved with the NEWEST of the batch, not
+        // the first one to arrive. Resolving inside the loop handed back the
+        // oldest member of a batch that could span a minute or more - an
+        // observation so stale it was a cache hit in all but name, which is
+        // exactly the ambiguity ForcedFix exists to remove.
+        var pending = Interlocked.Exchange(ref _pendingForcedFix, null);
 
-            var pending = Interlocked.Exchange(ref _pendingForcedFix, null);
+        pending?.TrySetResult(ToMauiLocation(locations[^1]));
+    }
 
-            pending?.TrySetResult(converted);
-        }
+    // the single place a cache hit is turned into a result, so the flag
+    // cannot be set wrong at one of the call sites and right at the others
+    private ForcedFix? FromCache()
+    {
+        var cached = _manager.Location;
+
+        return cached is null ? null : new ForcedFix(ToMauiLocation(cached), FromCache: true);
     }
 
     private static MauiLocation ToMauiLocation(CLLocation location) => new()

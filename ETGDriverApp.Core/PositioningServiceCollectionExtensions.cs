@@ -34,14 +34,13 @@ public static class PositioningServiceCollectionExtensions
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IValidateOptions<PositioningOptions>, PositioningOptionsValidator>());
 
-        services.AddSingleton<PositioningDiagnostics>();
-        services.AddSingleton<IPositioningDiagnostics>(
-            sp => sp.GetRequiredService<PositioningDiagnostics>());
+        services.AddSingleton<IPositioningDiagnostics, PositioningDiagnostics>();
 
         services.AddSingleton(TimeProvider.System);
 
         services.AddSingleton<IAccuracyGate, AccuracyGate>();
         services.AddSingleton<IPlausibilityGate, PlausibilityGate>();
+        services.AddSingleton<IAdmissionGate, AdmissionGate>();
         services.AddSingleton<IMapMatcher, NoOpMapMatcher>();
 
         services.AddSingleton<DeviceOrientationReference>();

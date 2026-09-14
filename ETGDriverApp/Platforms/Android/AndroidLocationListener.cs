@@ -136,7 +136,16 @@ internal class AndroidLocationListener
         return Task.CompletedTask;
     }
 
-    async Task<MauiLocation?> SessionLocationListener.GetForcedFixAsync(CancellationToken ct)
+    // Returns ForcedFix rather than a bare location so the two very different
+    // outcomes are distinguishable downstream.
+    //
+    // GetLastKnownLocation is a cache with no freshness contract whatsoever:
+    // it can be seconds old or hours old, and nothing on the returned object
+    // says which. This method is the only place in the system that knows a
+    // cache lookup happened - it is right here, in an `if` branch - so it is
+    // the only place that can report it without guessing. It used to throw
+    // that away, leaving the pipeline to infer provenance from a timestamp.
+    async Task<ForcedFix?> SessionLocationListener.GetForcedFixAsync(CancellationToken ct)
     {
         if (_locationManager is null)
             return null;
@@ -195,21 +204,19 @@ internal class AndroidLocationListener
 #pragma warning restore CA1422, CS0618
             }
 
-            var lastKnown = _locationManager.GetLastKnownLocation(provider);
-
-            return lastKnown is null ? null : ToMauiLocation(lastKnown);
+            return FromCache(provider);
         }
 
         await timeoutCts.CancelAsync();
 
         var fresh = await completion.Task;
 
+        // the request completed and produced a real observation
         if (fresh is not null)
-            return fresh;
+            return new ForcedFix(fresh, FromCache: false);
 
-        var fallback = _locationManager.GetLastKnownLocation(provider);
-
-        return fallback is null ? null : ToMauiLocation(fallback);
+        // the consumer fired with null: the provider went down mid-request
+        return FromCache(provider);
     }
 
     void PlatformLocationListener.OnLocationChanged(AndroidLocation location) =>
@@ -241,6 +248,15 @@ internal class AndroidLocationListener
         _locationManager?.RemoveUpdates(this);
 
         _sessionEndedUnexpectedly?.Invoke(this, SessionEndReason.ForegroundServiceStopped);
+    }
+
+    // the single place a cache hit is turned into a result, so the flag
+    // cannot be set wrong at one of the call sites and right at the others
+    private ForcedFix? FromCache(string provider)
+    {
+        var cached = _locationManager?.GetLastKnownLocation(provider);
+
+        return cached is null ? null : new ForcedFix(ToMauiLocation(cached), FromCache: true);
     }
 
     private static string? SelectProvider(LocationManager manager)

@@ -40,7 +40,7 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
     private const double MinSeedAccuracyMeters = 1;
 
     private readonly IAccuracyGate _accuracyGate;
-    private readonly IPlausibilityGate _plausibilityGate;
+    private readonly IAdmissionGate _admissionGate;
     private readonly IMapMatcher _mapMatcher;
     private readonly IPositionStateMachine _stateMachine;
     private readonly IDeadReckoningEstimator _deadReckoning;
@@ -58,14 +58,14 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
     public PositionFilterPipeline(
         IAccuracyGate accuracyGate,
-        IPlausibilityGate plausibilityGate,
+        IAdmissionGate admissionGate,
         IMapMatcher mapMatcher,
         IPositionStateMachine stateMachine,
         IDeadReckoningEstimator deadReckoning,
         IOptionsMonitor<PositioningOptions> options)
     {
         _accuracyGate = accuracyGate;
-        _plausibilityGate = plausibilityGate;
+        _admissionGate = admissionGate;
         _mapMatcher = mapMatcher;
         _stateMachine = stateMachine;
         _deadReckoning = deadReckoning;
@@ -108,9 +108,13 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
         try
         {
-            // ordering: overlapping deliveries around a batched background
-            // wake must not drag the track backwards
-            if (!sample.IsDeadReckoned && sample.Timestamp < _lastAcceptedTimestamp)
+            // Ordering: overlapping deliveries around a batched background
+            // wake must not drag the track backwards.
+            //
+            // `<=`, not `<`. A repeated cached fix carries the same timestamp
+            // every time the platform hands it back, and a strict comparison
+            // let the identical sample through on every tick.
+            if (!sample.IsDeadReckoned && sample.Timestamp <= _lastAcceptedTimestamp)
             {
                 RaiseEvaluated(sample, false, RejectionReason.OutOfOrderTimestamp);
 
@@ -136,40 +140,32 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
                 return null;
             }
 
-            // During DeadReckoning the filter has been fed only extrapolations.
-            // Judging the first real fix against them locks out recovery
-            // whenever DR has drifted, so the real fix re-anchors instead.
-            var reanchor = !sample.IsDeadReckoned && extrapolating;
+            // Predict before the gate so the innovation frame has a current
+            // prediction to judge against. Safe now that samples the pipeline
+            // discards outright have already returned above.
+            if (_filter.IsInitialized)
+                _filter.Predict(sample.Timestamp);
 
-            if (!_filter.IsInitialized || reanchor)
+            var verdict = _admissionGate.Evaluate(
+                new AdmissionContext(sample, _filter, Volatile.Read(ref _published), extrapolating));
+
+            if (!verdict.Accepted)
             {
-                // a DR estimate cannot seed the filter; it has no anchor of
-                // its own to offer
-                if (sample.IsDeadReckoned)
-                    return null;
+                RaiseEvaluated(sample, false, verdict.Reason, verdict.Diagnostics);
 
+                return null;
+            }
+
+            if (verdict.Effect == AdmissionEffect.Reseed)
+            {
                 _filter.Initialize(
                     sample.Latitude, sample.Longitude, sample.AccuracyMeters, sample.Timestamp);
             }
             else
             {
-                _filter.Predict(sample.Timestamp);
-
-                var verdict = _plausibilityGate.Evaluate(sample, _filter);
-
-                if (!verdict.Accepted)
-                {
-                    RaiseEvaluated(
-                        sample, false, RejectionReason.ImplausibleJump, verdict.Describe());
-
-                    return null;
-                }
-
                 _filter.UpdatePosition(sample.Latitude, sample.Longitude, sample.AccuracyMeters);
 
-                if (!sample.IsDeadReckoned &&
-                    sample is { SpeedMps: { } speed, CourseDegrees: { } course })
-                    _filter.UpdateVelocity(speed, course, filterOptions.ReportedSpeedAccuracyMps);
+                ApplyVelocityUpdate(sample, filterOptions);
             }
 
             var (lat, lon) = _filter.Position;
@@ -182,9 +178,13 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
             _stateMachine.NotifyFixAccepted(matched, tier);
 
-            // the filter is the authoritative velocity source; DR only needs
-            // an anchor and a speed to extrapolate from
-            if (tier == AccuracyTier.Good && !sample.IsDeadReckoned)
+            // The filter is the authoritative velocity source; DR only needs
+            // an anchor and a speed to extrapolate from.
+            //
+            // `IsObserved` rather than `!IsDeadReckoned`: a cached fix is not
+            // an observation of now, so anchoring DR to it would restart the
+            // drift budget from a position the vehicle has already left.
+            if (tier == AccuracyTier.Good && sample.IsObserved)
                 _deadReckoning.RecalibrateAgainst(matched, _filter.SpeedMps);
 
             var result = matched with
@@ -267,6 +267,50 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 
     private void OnLocationBecameUnavailable(object? sender, EventArgs e) =>
         _locationUnavailable?.Invoke(this, EventArgs.Empty);
+
+    // caller holds _gate.
+    //
+    // Two sources of velocity information, and the distinction matters.
+    //
+    // An OBSERVED fix carries the platform's own speed and course, measured
+    // independently of anything we computed. It updates velocity normally.
+    //
+    // A DEAD-RECKONED sample's speed is one the filter handed to DR at the
+    // last recalibration, so feeding it back is circular - it would let the
+    // filter confirm its own belief and the velocity would never decay.
+    //
+    // With ONE exception, which is the whole reason this method exists. When
+    // DR reports exactly zero, that is not the held speed echoing back: the
+    // estimator zeroes it because the accelerometer says the vehicle is
+    // stationary. Motion state comes from a sensor the filter has never
+    // touched, so a stop is genuinely new evidence.
+    //
+    // Without this, a vehicle that stops mid-outage keeps being published as
+    // moving. A captured run shows it plainly: DR reporting speed=0.0 with
+    // its own estimate frozen, while the published track carried on at 12m/s
+    // for fifty seconds and the error grew from 642m to 844m. The DR sample
+    // does update position, but it arrives claiming thousands of metres of
+    // accuracy, far too weak to overcome the coasting velocity state. The
+    // velocity itself has to be corrected, and only a zero-velocity update
+    // can do it.
+    //
+    // Non-zero DR speeds stay excluded. This is the standard zero-velocity
+    // update of inertial navigation, not a general trust in DR's kinematics.
+    private void ApplyVelocityUpdate(RawPositionSample sample, KalmanFilterOptions filter)
+    {
+        if (sample is not { SpeedMps: { } speed, CourseDegrees: { } course })
+            return;
+
+        if (sample.IsObserved)
+        {
+            _filter.UpdateVelocity(speed, course, filter.ReportedSpeedAccuracyMps);
+
+            return;
+        }
+
+        if (sample.IsDeadReckoned && speed == 0)
+            _filter.UpdateVelocity(0, course, filter.StationaryUpdateAccuracyMps);
+    }
 
     private void RaiseEvaluated(
         RawPositionSample sample, bool accepted, RejectionReason reason, string? diagnostics = null) =>
