@@ -25,6 +25,8 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
         // means the evidence was withdrawn, not that weaker evidence arrived.
         public GeofenceEventConfidence? OfferedConfidence { get; set; }
 
+        // When the offer was first made. An upgrade does not move it: the
+        // arrival happened when it happened, better evidence only grades it.
         public DateTimeOffset? OfferedAt { get; set; }
 
         public ArrivalConfirmation? Confirmation { get; set; }
@@ -39,6 +41,17 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
             Confirmation = null;
             Left = false;
         }
+    }
+
+    // What one observation obliges the monitor to announce. At most one
+    // member is ever set: an observation either contradicts a confirmation,
+    // withdraws an offer, upgrades an offer, or says nothing.
+    private readonly record struct Judgement(
+        ArrivalConfirmation? Dropped = null,
+        GeofenceEventConfidence? Lapsed = null,
+        GeofenceEventConfidence? Upgraded = null)
+    {
+        public static readonly Judgement None = new();
     }
 
     private readonly IGeofenceRegistry _registry;
@@ -183,41 +196,46 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
     void IDisposable.Dispose() => _evaluator.Observed -= OnObserved;
 
     // Every position, every watched site. The only work done here is asking
-    // whether fresh evidence has moved against a belief we are holding -
-    // either a confirmation the driver made, or an offer we made to them.
+    // whether fresh evidence bears on a belief we are holding - either a
+    // confirmation the driver made, or an offer we made to them.
     private void OnObserved(object? sender, RegionObservation observation)
     {
-        ArrivalConfirmation? dropped;
-        GeofenceEventConfidence? lapsed;
+        Judgement judgement;
 
         // The lock decides and mutates; it does not return. Every exit path
         // falls through to the dispatch below, so there is no way to drop a
         // belief silently by adding an early return later.
         lock (_sync)
-            (dropped, lapsed) = JudgeAgainst(observation);
+            judgement = JudgeAgainst(observation);
 
-        if (dropped is { } d)
+        if (judgement.Dropped is { } d)
             _arrivalContradicted?.Invoke(
                 this, new ArrivalContradictedEventArgs(observation.SiteKey, d, observation.At));
 
-        if (lapsed is { } l)
+        if (judgement.Lapsed is { } l)
             _arrivalLapsed?.Invoke(
                 this, new SiteArrivalEventArgs(observation.SiteKey, l, observation.At));
+
+        if (judgement.Upgraded is { } u)
+            _arrivalAvailable?.Invoke(
+                this, new SiteArrivalEventArgs(observation.SiteKey, u, observation.At));
     }
 
     // caller holds _sync. Returns what the caller must announce, if anything.
-    private (ArrivalConfirmation? Dropped, GeofenceEventConfidence? Lapsed) JudgeAgainst(
-        RegionObservation observation)
+    private Judgement JudgeAgainst(RegionObservation observation)
     {
         // one lookup; no scan, so no way to stop at the wrong entry
         if (!_watched.TryGetValue(observation.SiteKey, out var watch))
-            return (null, null);
+            return Judgement.None;
 
         if (watch.Confirmation is { } confirmation)
         {
+            // The driver has already answered, so a better fix is not
+            // re-offered: there is nobody left to ask. Only a contradiction
+            // matters here.
             if (ArrivalStanding.Evaluate(confirmation, observation)
                 is not ConfirmationStanding.Contradicted)
-                return (null, null);
+                return Judgement.None;
 
             // The offer goes with it: evidence that contradicts the
             // confirmation contradicts the offer it rested on.
@@ -231,11 +249,11 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
             // Only the contradiction is announced. A lapse alongside it would
             // be a second event about the same fact, and the caller already
             // has to clear the offer on a contradiction.
-            return (confirmation, null);
+            return new Judgement(Dropped: confirmation);
         }
 
         if (watch.OfferedConfidence is not { } offered)
-            return (null, null);
+            return Judgement.None;
 
         // An offer is judged by exactly the test a confirmation is, so the
         // two cannot drift apart. Standing in for the human who has not
@@ -244,13 +262,31 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
             new ArrivalConfirmation(observation.SiteKey, offered, watch.OfferedAt!.Value),
             observation);
 
-        if (standing is not ConfirmationStanding.Contradicted)
-            return (null, null);
+        switch (standing)
+        {
+            case ConfirmationStanding.Contradicted:
+                watch.OfferedConfidence = null;
+                watch.OfferedAt = null;
 
-        watch.OfferedConfidence = null;
-        watch.OfferedAt = null;
+                return new Judgement(Lapsed: offered);
 
-        return (null, offered);
+            // Better evidence that agrees. The evaluator will not raise
+            // Entered again - it only raises on a containment flip, and we
+            // are already inside - so the upgrade has to come from here.
+            //
+            // Evaluate only returns Strengthened for evidence strictly better
+            // than the basis, not Suppressed, inside, and clear of the noise
+            // gate. That is what makes this monotonic: Suppressed -> Low ->
+            // Trusted, never down, never the same grade twice.
+            case ConfirmationStanding.Strengthened
+                when observation.Confidence > offered:
+                watch.OfferedConfidence = observation.Confidence;
+
+                return new Judgement(Upgraded: observation.Confidence);
+
+            default:
+                return Judgement.None;
+        }
     }
 
     private void OnTransition(
@@ -280,11 +316,12 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
             if (watch.Confirmation is not null)
                 return;
 
-            // An enter can be re-raised as the evidence for it improves:
-            // Suppressed under dead reckoning, then LowConfidence once a real
-            // fix backs it up. Only ever move up.
+            // Only ever move up, and only announce a move. An enter at or
+            // below the standing offer adds nothing the caller has not
+            // already been told - including one landing right after
+            // OnObserved upgraded the offer on the same position.
             if (watch.OfferedConfidence is { } existing && existing >= confidence)
-                confidence = existing;
+                return;
 
             watch.OfferedConfidence = confidence;
             watch.OfferedAt ??= _clock.GetUtcNow();
