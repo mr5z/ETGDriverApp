@@ -209,7 +209,8 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             {
                 State = _stateMachine.CurrentState,
                 UncertaintyRadiusMeters = _filter.PositionUncertaintyMeters,
-                IsDefensible = _stateMachine.IsDefensible
+                IsDefensible = _stateMachine.IsDefensible,
+                EstimatedSpeedMps = _filter.SpeedMps
             };
 
             Volatile.Write(ref _published, result);

@@ -136,6 +136,7 @@ public record NormalizedPosition(
     DateTimeOffset Timestamp,
     PositionState State,
     double? UncertaintyRadiusMeters = null,
+    double? EstimatedSpeedMps = null,
 
     // Whether the state machine still considers this position defensible.
     // Defaults true so a position built without an opinion is not silently
