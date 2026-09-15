@@ -114,9 +114,13 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         {
             var published = Volatile.Read(ref _published);
             var prediction = Volatile.Read(ref _prediction);
-
-            if (published is null || prediction is null)
+            
+            if (published is null)
                 return null;
+
+            // no prediction yet, so nothing has aged it
+            if (prediction is null)
+                return published;
 
             // only a prediction made after this position was published says
             // anything about how it has aged
