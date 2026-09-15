@@ -137,12 +137,20 @@ internal class StalenessWatchdog(
             forcedFixDue = now - _lastForcedFixAt >= staleness.MinTimeBetweenForcedFixes;
         }
 
+        // Predict from the SOFT threshold, not the hard one. The prediction
+        // is what ages the published radius (IPositionFilterPipeline.Current),
+        // and between the two thresholds the last fix is deliberately held -
+        // it should be held honestly. Nothing else changes before the hard
+        // threshold: the state machine is still only told at that point.
+        if (sinceFix < staleness.SoftThreshold)
+            return;
+
         // repeated calls are intended: the filter's uncertainty grows between
         // them, so the give-up threshold is reached on a later tick
+        var uncertainty = pipeline.PredictUncertaintyMeters(now);
+
         if (sinceFix >= staleness.HardThreshold)
         {
-            var uncertainty = pipeline.PredictUncertaintyMeters(now);
-
             // Covariance may only shrink on evidence, and while blind there
             // is none - so a fall here is a contradiction worth naming. It
             // caught the DR feedback loop: uncertainty dropping 141m -> 29m
@@ -160,10 +168,11 @@ internal class StalenessWatchdog(
             _lastTracedUncertainty = uncertainty;
 
             // The number the state machine gives up on is the filter's
-            // covariance. Published radius now derives from it for DR
-            // samples, so the two agreeing is expected; what is worth
-            // watching is the SOURCE, since a real fix landing here means
-            // the watchdog and the pipeline disagree about staleness.
+            // covariance. Published radius derives from it for DR samples,
+            // and now for a held fix too, so the two agreeing is expected;
+            // what is worth watching is the SOURCE, since a real fix landing
+            // here means the watchdog and the pipeline disagree about
+            // staleness. `claimed` stays the producer's own figure by design.
             if (diagnostics.IsEnabled)
             {
                 var published = pipeline.Current;
@@ -179,7 +188,7 @@ internal class StalenessWatchdog(
             stateMachine.NotifyFixStale(uncertainty);
         }
 
-        if (sinceFix >= staleness.SoftThreshold && forcedFixDue)
+        if (forcedFixDue)
         {
             lock (_sync)
                 _lastForcedFixAt = now;

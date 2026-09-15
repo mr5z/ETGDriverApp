@@ -275,8 +275,8 @@ internal class SiteArrivalMonitor : ISiteArrivalMonitor, IDisposable
             // are already inside - so the upgrade has to come from here.
             //
             // Evaluate only returns Strengthened for evidence strictly better
-            // than the basis, not Suppressed, inside, and clear of the noise
-            // gate. That is what makes this monotonic: Suppressed -> Low ->
+            // than the basis, not Unverified, inside, and clear of the noise
+            // gate. That is what makes this monotonic: Unverified -> Low ->
             // Trusted, never down, never the same grade twice.
             case ConfirmationStanding.Strengthened
                 when observation.Confidence > offered:

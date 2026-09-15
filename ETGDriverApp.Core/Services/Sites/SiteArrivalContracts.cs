@@ -84,7 +84,7 @@ public interface ISiteArrivalMonitor
 
     ArrivalConfirmation? ConfirmationFor(string siteKey);
 
-    // An arrival worth offering. Confidence can be Suppressed: seen under
+    // An arrival worth offering. Confidence can be Unverified: seen under
     // dead reckoning and not corroborated by a real fix yet. May be raised
     // more than once for the same site as the evidence improves.
     event EventHandler<SiteArrivalEventArgs> ArrivalAvailable;

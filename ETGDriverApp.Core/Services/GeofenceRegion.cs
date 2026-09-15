@@ -8,7 +8,7 @@ namespace ETGDriverApp.Core.Services;
 // what it did on the earlier one.
 public enum GeofenceTransition { Entered, Exited }
 
-public enum GeofenceEventConfidence { Suppressed, LowConfidence, Trusted }
+public enum GeofenceEventConfidence { Unverified, LowConfidence, Trusted }
 
 // Where a position sits relative to a boundary. Distance and containment are
 // one fact, not two: returning a bare unsigned double made "80 m from the

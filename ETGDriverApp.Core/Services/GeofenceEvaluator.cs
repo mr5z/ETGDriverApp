@@ -168,7 +168,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         }
 
         // The drift gate exists to stop an automatic event firing on noise.
-        // A suppressed enter triggers nothing automatic - it only tells the
+        // An unverified enter triggers nothing automatic - it only tells the
         // consumer an arrival is worth offering to a human - so it is judged
         // on containment alone. Without this exemption the gate is
         // unsatisfiable during DR: the accumulated accuracy radius is
@@ -182,9 +182,9 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // compared.
         //
         // IsDefensible is deliberately NOT consulted here, and that was a
-        // considered choice rather than an oversight. A suppressed enter asks
+        // considered choice rather than an oversight. An unverified enter asks
         // a human a question; it triggers nothing automatic, the confirmation
-        // is stamped Suppressed, and a later Trusted fix can still contradict
+        // is stamped Unverified, and a later Trusted fix can still contradict
         // it through ArrivalStanding. Blind time is the wrong gate for that
         // question - captured runs at 300s blind produced true errors of
         // 1691m, 95m and 10m, so elapsed time separates none of those cases.
@@ -194,7 +194,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // signals to the host, and gate no arrival.
         var offeringUnverifiedEnter =
             inside &&
-            confidence == GeofenceEventConfidence.Suppressed &&
+            confidence == GeofenceEventConfidence.Unverified &&
             position.EffectiveRadiusMeters <= region.RadiusMeters * geofence.MaxUnverifiedRadiusMultiplier;
 
         // a crossing inside our own error radius is indistinguishable from drift
@@ -239,7 +239,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
 
         tracked.Inside = inside;
 
-        if (confidence == GeofenceEventConfidence.Suppressed && !inside)
+        if (confidence == GeofenceEventConfidence.Unverified && !inside)
         {
             tracked.PendingFromDeadReckoning = transition;
             return;
@@ -258,7 +258,7 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         GeofenceEventConfidence confidence,
         List<PendingEvent> toRaise)
     {
-        if (confidence is GeofenceEventConfidence.Suppressed)
+        if (confidence is GeofenceEventConfidence.Unverified)
             return;
 
         if (tracked.PendingFromDeadReckoning is not { } pending)
@@ -285,18 +285,18 @@ internal class GeofenceEvaluator(IOptionsMonitor<PositioningOptions> options)
         // nothing at all. A captured run kept offering arrivals for three and
         // a half minutes after LocationUnavailable fired.
         if (!position.IsDefensible)
-            return GeofenceEventConfidence.Suppressed;
+            return GeofenceEventConfidence.Unverified;
 
         return position.State switch
         {
             // no position at all cannot be evidence of anything
             PositionState.NoFix or PositionState.DeadReckoning =>
-                GeofenceEventConfidence.Suppressed,
+                GeofenceEventConfidence.Unverified,
             PositionState.Degraded or PositionState.Reacquiring =>
                 GeofenceEventConfidence.LowConfidence,
             PositionState.Tracking =>
                 GeofenceEventConfidence.Trusted,
-            _ => GeofenceEventConfidence.Suppressed
+            _ => GeofenceEventConfidence.Unverified
         };
     }
 }

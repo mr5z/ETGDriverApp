@@ -14,8 +14,9 @@ internal interface IDeadReckoningEstimator : IAsyncDisposable
 
     void RecalibrateAgainst(NormalizedPosition trustedFix, double speedMps);
 
-    // extrapolation runs only while active; an inactive tick leaves the
-    // anchor untouched, so recalibration always compares against it
+    // Controls PUBLISHING only. Integration runs on every tick from the last
+    // anchor regardless, so motion during the gap before DR engages is
+    // already counted when it does.
     void SetActive(bool active);
 
     event EventHandler<RawPositionSample> EstimateProduced;
@@ -39,6 +40,24 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     private bool _hasAnchor;
     private double _speedMps;
     private DateTimeOffset _anchoredAt;
+
+    // The last trusted fix, kept apart from the estimate. The estimate now
+    // advances between fixes even while inactive, so it can no longer double
+    // as the recalibration baseline: during Tracking it would sit next to the
+    // incoming fix, fall below the floor, and heading would never calibrate.
+    //
+    // Captured run this fixes: blackout at 22:32:37, vehicle drove ~144m and
+    // stopped at the site by 22:32:49, DR engaged at 22:32:57. Integration
+    // only started at engage, by which time motion was Stationary, so DR
+    // froze 156m short and never entered the site.
+    private double _anchorLatitude;
+    private double _anchorLongitude;
+
+    // Whether an estimate has been published since the anchor. If so, the
+    // next recalibration measures the catch-up vector from the drifted
+    // estimate, exactly as before; if not, it measures from the anchor,
+    // which is what the unmoved estimate used to be.
+    private bool _publishedSinceAnchor;
 
     // raw integrated device yaw, bias-corrected; never overwritten at recalibration
     private double _headingDegrees;
@@ -97,9 +116,12 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             _speedMps = speedMps;
             _estimatedLatitude = trustedFix.Latitude;
             _estimatedLongitude = trustedFix.Longitude;
+            _anchorLatitude = trustedFix.Latitude;
+            _anchorLongitude = trustedFix.Longitude;
             _lastExtrapolationAt = trustedFix.Timestamp;
             _anchoredAt = trustedFix.Timestamp;
             _accuracySinceAnchor = dr.BaseAccuracyMeters;
+            _publishedSinceAnchor = false;
             _hasAnchor = true;
         }
     }
@@ -194,7 +216,14 @@ internal class HeadingIntegrationDeadReckoningEstimator(
     private void TryUpdateHeadingFrom(
         NormalizedPosition trustedFix, double speedMps, DeadReckoningOptions dr)
     {
-        var elapsed = trustedFix.Timestamp - _lastExtrapolationAt;
+        // Unpublished integration is not part of the baseline: measuring from
+        // the anchor reproduces the old behaviour exactly, where the estimate
+        // never moved while inactive.
+        var (refLatitude, refLongitude, refTime) = _publishedSinceAnchor
+            ? (_estimatedLatitude, _estimatedLongitude, _lastExtrapolationAt)
+            : (_anchorLatitude, _anchorLongitude, _anchoredAt);
+
+        var elapsed = trustedFix.Timestamp - refTime;
 
         if (elapsed <= dr.MinRecalibrationInterval)
         {
@@ -204,7 +233,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         }
 
         var travelled = Geo.DistanceMeters(
-            _estimatedLatitude, _estimatedLongitude,
+            refLatitude, refLongitude,
             trustedFix.Latitude, trustedFix.Longitude);
 
         var floor = Math.Max(trustedFix.EffectiveRadiusMeters, dr.MinTrustworthyFixErrorMeters);
@@ -242,7 +271,7 @@ internal class HeadingIntegrationDeadReckoningEstimator(
         }
 
         var impliedHeading = Geo.BearingDegrees(
-            _estimatedLatitude, _estimatedLongitude,
+            refLatitude, refLongitude,
             trustedFix.Latitude, trustedFix.Longitude);
 
         UpdateOffsetAndBias(impliedHeading, trustedFix.Timestamp, dr);
@@ -326,7 +355,9 @@ internal class HeadingIntegrationDeadReckoningEstimator(
 
         lock (_sync)
         {
-            if (!_started || !_hasAnchor || !_active)
+            // _active is deliberately not checked here: integration must run
+            // through the gap before DR engages, or motion in that gap is lost
+            if (!_started || !_hasAnchor)
                 return;
 
             var now = clock.GetUtcNow();
@@ -335,6 +366,8 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             if (dt <= 0)
                 return;
 
+            // read per tick, so a vehicle that stops (or moves off again)
+            // inside the gap is integrated as it actually moved
             var effectiveSpeed = _motionState == MotionState.Stationary ? 0 : _speedMps;
             var correctedHeading = Geo.NormalizeDegrees(_headingDegrees + _headingOffsetDegrees);
 
@@ -353,6 +386,12 @@ internal class HeadingIntegrationDeadReckoningEstimator(
             // make a drifted position look precise
             _accuracySinceAnchor = Math.Max(
                 _accuracySinceAnchor, DriftAccuracyMeters(sinceAnchor, effectiveSpeed, dr));
+
+            // keep counting, don't publish
+            if (!_active)
+                return;
+
+            _publishedSinceAnchor = true;
 
             sample = new RawPositionSample(
                 lat, lon, _accuracySinceAnchor, now, PositionSourceType.DeadReckoned,

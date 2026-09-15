@@ -58,7 +58,7 @@ public static class ArrivalStanding
         if (confirmation.BasisConfidence is { } basis && observation.Confidence <= basis)
             return ConfirmationStanding.Unchanged;
 
-        if (observation.Confidence == GeofenceEventConfidence.Suppressed)
+        if (observation.Confidence == GeofenceEventConfidence.Unverified)
             return ConfirmationStanding.Unchanged;
 
         // Outside, but not by more than we could be wrong by, is not evidence
@@ -74,7 +74,7 @@ public static class ArrivalStanding
         // Retraction needs the top grade, and only retraction does.
         //
         // A reseed out of dead reckoning surfaces as Reacquiring, which is
-        // LowConfidence, which beats a Suppressed basis - so one adopted fix
+        // LowConfidence, which beats an Unverified basis - so one adopted fix
         // could overturn the driver. Strengthening on the same evidence is
         // free; being wrong about it costs nothing. Contradicting is not.
         return observation.Confidence == GeofenceEventConfidence.Trusted

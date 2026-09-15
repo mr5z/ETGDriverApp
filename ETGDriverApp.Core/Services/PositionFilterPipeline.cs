@@ -25,6 +25,10 @@ public interface IPositionFilterPipeline
     // widens the covariance so the first real fix dominates
     void SeedFrom(NormalizedPosition position, TimeSpan gap);
 
+    // The last published position, with its radius widened to the latest
+    // prediction if one has been made since. The position itself is never
+    // moved: holding the last fix through a short gap is intended, but
+    // claiming it is as precise as when it landed is not.
     NormalizedPosition? Current { get; }
 }
 
@@ -38,6 +42,10 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
 {
     // floor on the accuracy a persisted position is re-seeded with
     private const double MinSeedAccuracyMeters = 1;
+
+    // One reference so Current reads meters and time as a pair; two separate
+    // fields could be torn between a watchdog write and a host read.
+    private sealed record UncertaintyPrediction(double Meters, DateTimeOffset At);
 
     private readonly IAccuracyGate _accuracyGate;
     private readonly IAdmissionGate _admissionGate;
@@ -55,6 +63,10 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
     private NormalizedPosition? _published;
     private DateTimeOffset _lastAcceptedTimestamp = DateTimeOffset.MinValue;
     private double _lastKnownUncertaintyMeters;
+
+    // Latest watchdog prediction. Only applied to a published position older
+    // than it, so a fresh fix is never widened by a prediction that predates it.
+    private UncertaintyPrediction? _prediction;
 
     public PositionFilterPipeline(
         IAccuracyGate accuracyGate,
@@ -96,7 +108,29 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
         remove => _locationUnavailable -= value;
     }
 
-    NormalizedPosition? IPositionFilterPipeline.Current => Volatile.Read(ref _published);
+    NormalizedPosition? IPositionFilterPipeline.Current
+    {
+        get
+        {
+            var published = Volatile.Read(ref _published);
+            var prediction = Volatile.Read(ref _prediction);
+
+            if (published is null || prediction is null)
+                return null;
+
+            // only a prediction made after this position was published says
+            // anything about how it has aged
+            if (prediction.At <= published.Timestamp)
+                return published;
+
+            // never narrows: the filter's covariance only grows while blind,
+            // and a published radius must not look better on a later read
+            if (prediction.Meters <= (published.UncertaintyRadiusMeters ?? 0))
+                return published;
+
+            return published with { UncertaintyRadiusMeters = prediction.Meters };
+        }
+    }
 
     async Task<NormalizedPosition?> IPositionFilterPipeline.IngestAsync(
         RawPositionSample sample, CancellationToken ct)
@@ -244,6 +278,8 @@ internal class PositionFilterPipeline : IPositionFilterPipeline, IDisposable
             _filter.Predict(now);
 
             _lastKnownUncertaintyMeters = _filter.PositionUncertaintyMeters;
+
+            Volatile.Write(ref _prediction, new UncertaintyPrediction(_lastKnownUncertaintyMeters, now));
 
             return _lastKnownUncertaintyMeters;
         }
